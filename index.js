@@ -37,6 +37,10 @@ client.on(Events.MessageCreate, message => {
     if (message.content === '!sorry' || message.content === '!申し訳なさございません' || message.content === '!s') {
         message.reply('申し訳なさございません。');
     }
+
+    if (message.content === '!d') {
+        message.reply('ディスコ上げときますねー');
+    }
 });
 
 // Log in to Discord with your client's token

@@ -93,6 +93,7 @@ function getBoueigunInfo() {
 
 // ========== リマインダー機能 ==========
 const reminders = new Map(); // channelId -> [{ time: Date, userId: string, message: string }]
+const fixedCalendars = new Map(); // channelId -> { messageId: string, year: number, month: number }
 
 function getRemindersForChannel(channelId) {
     if (!reminders.has(channelId)) {
@@ -107,47 +108,113 @@ function generateCalendar(year, month, channelId) {
     const firstDay = new Date(year, month - 1, 1).getDay(); // 0=日曜
 
     // リマインダーがある日を取得
-    const reminderDays = new Set();
+    const reminderDays = new Map(); // day -> count
     channelReminders.forEach(r => {
         const d = r.time;
         if (d.getFullYear() === year && d.getMonth() + 1 === month) {
-            reminderDays.add(d.getDate());
+            reminderDays.set(d.getDate(), (reminderDays.get(d.getDate()) || 0) + 1);
         }
     });
 
-    // 今日
     const today = new Date();
     const todayDate = (today.getFullYear() === year && today.getMonth() + 1 === month) ? today.getDate() : -1;
 
-    let cal = '日  月  火  水  木  金  土\n';
-    let line = '';
+    // ヘッダー
+    let cal = '┌──────────────────────────┐\n';
+    cal += '│ 日   月   火   水   木   金   土  │\n';
+    cal += '├──────────────────────────┤\n';
+
+    let line = '│';
 
     // 最初の空白
     for (let i = 0; i < firstDay; i++) {
-        line += '    ';
+        line += '     ';
     }
 
     for (let day = 1; day <= daysInMonth; day++) {
         let dayStr;
         if (day === todayDate && reminderDays.has(day)) {
-            dayStr = `[${String(day).padStart(2)}]`;
+            dayStr = `》${String(day).padStart(2)}◆`;
         } else if (day === todayDate) {
-            dayStr = `<${String(day).padStart(2)}>`;
+            dayStr = `》${String(day).padStart(2)} `;
         } else if (reminderDays.has(day)) {
-            dayStr = `*${String(day).padStart(2)}*`;
+            dayStr = ` ${String(day).padStart(2)}◆`;
         } else {
-            dayStr = ` ${String(day).padStart(2)} `;
+            dayStr = ` ${String(day).padStart(2)}  `;
         }
         line += dayStr;
 
         const dayOfWeek = (firstDay + day - 1) % 7;
-        if (dayOfWeek === 6 || day === daysInMonth) {
+        if (dayOfWeek === 6) {
+            line += '│';
             cal += line + '\n';
-            line = '';
+            line = '│';
+        } else if (day === daysInMonth) {
+            // 最後の行の残りを埋める
+            for (let i = dayOfWeek + 1; i <= 6; i++) {
+                line += '     ';
+            }
+            line += '│';
+            cal += line + '\n';
         }
     }
 
+    cal += '└──────────────────────────┘';
     return cal;
+}
+
+function buildCalendarEmbed(year, month, channelId) {
+    const channelReminders = getRemindersForChannel(channelId);
+    const cal = generateCalendar(year, month, channelId);
+
+    const monthNames = ['', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
+
+    const embed = new EmbedBuilder()
+        .setColor(0x2B2D31)
+        .setTitle(`📅  ${year}年 ${monthNames[month]}`)
+        .setDescription(`\`\`\`\n${cal}\n\`\`\``);
+
+    // 今月の予定一覧
+    const monthReminders = channelReminders
+        .filter(r => r.time.getFullYear() === year && r.time.getMonth() + 1 === month)
+        .sort((a, b) => a.time - b.time);
+
+    if (monthReminders.length > 0) {
+        const reminderList = monthReminders.map(r => {
+            const d = r.time;
+            const dateStr = `${d.getMonth() + 1}/${d.getDate()}`;
+            const timeStr = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+            const msg = r.message || 'リマインダー';
+            return `> 🔔 **${dateStr}** ${timeStr} - ${msg}`;
+        }).join('\n');
+        embed.addFields({ name: '📋 今月の予定', value: reminderList });
+    } else {
+        embed.addFields({ name: '📋 今月の予定', value: '> 予定はありません' });
+    }
+
+    embed.setFooter({ text: '》= 今日  ◆ = 予定あり  │  !cal fix で固定表示' });
+    embed.setTimestamp();
+
+    return embed;
+}
+
+async function updateFixedCalendar(channelId) {
+    const fixed = fixedCalendars.get(channelId);
+    if (!fixed) return;
+
+    try {
+        const channel = client.channels.cache.get(channelId);
+        if (!channel) return;
+        const msg = await channel.messages.fetch(fixed.messageId);
+        if (!msg) return;
+
+        const now = new Date();
+        const embed = buildCalendarEmbed(now.getFullYear(), now.getMonth() + 1, channelId);
+        await msg.edit({ embeds: [embed] });
+    } catch (e) {
+        // メッセージが削除された場合は固定を解除
+        fixedCalendars.delete(channelId);
+    }
 }
 
 // Create a new client instance with necessary intents
@@ -180,12 +247,20 @@ client.once(Events.ClientReady, readyClient => {
             });
             // 発火済みを削除（逆順）
             triggered.reverse().forEach(i => reminderList.splice(i, 1));
+            if (triggered.length > 0) updateFixedCalendar(channelId);
         });
     }, 60000); // 60秒ごとにチェック
+
+    // 固定カレンダーを1時間ごとに更新（今日マーク更新用）
+    setInterval(() => {
+        fixedCalendars.forEach((_, channelId) => {
+            updateFixedCalendar(channelId);
+        });
+    }, 3600000);
 });
 
 // Listen for messages
-client.on(Events.MessageCreate, message => {
+client.on(Events.MessageCreate, async message => {
     // Ignore messages from bots
     if (message.author.bot) return;
 
@@ -204,7 +279,7 @@ client.on(Events.MessageCreate, message => {
                 { name: '🎮 ネタ系', value: '`!n` ねけます\n`!m` もう無理\n`!mo` どうせｵﾚがﾋｰﾗｰ\n`!s` 申し訳なさございません\n`!d` ディスコ上げときますねー\n`!i` いいよ。ｵﾚ要らない\n`!a` あーいーいーいー\n`!si` 最近ｵﾚにあたり強くない？', inline: true },
                 { name: '📅 スケジュール', value: '`!b` 防衛軍スケジュール', inline: true },
                 { name: '⏰ リマインダー', value: '`!remind 21:00` 時刻指定\n`!remind 1/25 21:00` 日付指定\n`!remind 30m` 分指定\n`!r` 一覧表示', inline: true },
-                { name: '📅 カレンダー', value: '`!cal` 今月表示\n`!cal 2` 2月表示', inline: true },
+                { name: '📅 カレンダー', value: '`!cal` 今月表示\n`!cal 2` 月指定\n`!cal fix` 固定表示\n`!cal unfix` 固定解除', inline: true },
                 { name: '🎉 イベント', value: '`!3` 3月イベント告知', inline: true }
             )
             .setFooter({ text: 'Shin Bot' });
@@ -301,6 +376,9 @@ client.on(Events.MessageCreate, message => {
         const timeStr = `${targetTime.getHours()}:${String(targetTime.getMinutes()).padStart(2, '0')}`;
         const msgInfo = reminderMessage ? `\n📝 ${reminderMessage}` : '';
         message.reply(`⏰ ${dateStr} ${timeStr} にリマインドします！${msgInfo}`);
+
+        // 固定カレンダーを更新
+        updateFixedCalendar(message.channel.id);
     }
 
     // リマインダー一覧
@@ -321,32 +399,42 @@ client.on(Events.MessageCreate, message => {
 
     // カレンダー表示
     if (message.content === '!cal' || message.content === '!calendar' || message.content.startsWith('!cal ')) {
-        let year, month;
         const now = new Date();
+        let year = now.getFullYear();
+        let month = now.getMonth() + 1;
 
         if (message.content.startsWith('!cal ')) {
-            const calArgs = message.content.split(' ')[1];
+            const calArgs = message.content.split(' ').slice(1).join(' ');
+
+            // !cal fix - 固定カレンダー
+            if (calArgs === 'fix') {
+                const embed = buildCalendarEmbed(year, month, message.channel.id);
+                const sent = await message.channel.send({ embeds: [embed] });
+                fixedCalendars.set(message.channel.id, {
+                    messageId: sent.id,
+                    year: year,
+                    month: month
+                });
+                return;
+            }
+
+            // !cal unfix - 固定解除
+            if (calArgs === 'unfix') {
+                fixedCalendars.delete(message.channel.id);
+                message.reply('📅 固定カレンダーを解除しました');
+                return;
+            }
+
+            // !cal 2 - 月指定
             const calMatch = calArgs.match(/^(\d{1,2})(?:\/(\d{4}))?$/);
             if (calMatch) {
                 month = parseInt(calMatch[1]);
                 year = calMatch[2] ? parseInt(calMatch[2]) : now.getFullYear();
-            } else {
-                month = now.getMonth() + 1;
-                year = now.getFullYear();
             }
-        } else {
-            month = now.getMonth() + 1;
-            year = now.getFullYear();
         }
 
-        const cal = generateCalendar(year, month, message.channel.id);
-        const calEmbed = new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setTitle(`📅 ${year}年${month}月`)
-            .setDescription(`\`\`\`\n${cal}\`\`\``)
-            .setFooter({ text: '<今日>  *予定あり*  [両方]' });
-
-        message.reply({ embeds: [calEmbed] });
+        const embed = buildCalendarEmbed(year, month, message.channel.id);
+        message.reply({ embeds: [embed] });
     }
 
     // 防衛軍スケジュールコマンド

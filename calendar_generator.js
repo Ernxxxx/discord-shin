@@ -38,40 +38,39 @@ async function createCalendarImage(year, month, reminders) {
     await loadFont();
     console.log('Font loaded, creating image...');
 
-    const width = 800;
+    // Warm Gold デザイン設定
+    const width = 840;
     const rows = 6; // max 6 weeks
-    const headerHeight = 100;
-    const cellHeight = 80;
-    const height = headerHeight + cellHeight * rows + 50; // Dynamic height? Fixed is easier.
+    const headerHeight = 140;
+    const cellHeight = 90;
+    const cellWidth = 110;
+    const height = headerHeight + cellHeight * rows + 60;
 
     const img = PImage.make(width, height);
     const ctx = img.getContext('2d');
 
-    // Background
-    ctx.fillStyle = '#2B2D31'; // Discord dark gray
+    // 暖かいダーク背景
+    ctx.fillStyle = '#1f1a15';
     ctx.fillRect(0, 0, width, height);
 
-    // Title
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = "48px 'MPLUS1'";
+    // タイトル - アンバーゴールド
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = "52px 'MPLUS1'";
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`${year}年 ${month}月`, width / 2, 50);
+    ctx.fillText(`${year}年 ${month}月`, width / 2, 55);
 
     // Grid config
     const startX = 50;
-    const startY = 100;
-    const cellWidth = 100;
+    const startY = headerHeight;
     const days = ['日', '月', '火', '水', '木', '金', '土'];
 
-    // Header (Days of week)
-    ctx.font = "24px 'MPLUS1'";
+    // 曜日ヘッダー
+    ctx.font = "26px 'MPLUS1'";
+    const dayColors = ['#f87171', '#e5e7eb', '#e5e7eb', '#e5e7eb', '#e5e7eb', '#e5e7eb', '#60a5fa'];
     days.forEach((day, i) => {
         const x = startX + i * cellWidth + cellWidth / 2;
-        if (i === 0) ctx.fillStyle = '#FF6B6B'; // Sun red
-        else if (i === 6) ctx.fillStyle = '#4ECDC4'; // Sat blue/cyan
-        else ctx.fillStyle = '#FFFFFF';
-
+        ctx.fillStyle = dayColors[i];
         ctx.fillText(day, x, startY - 20);
     });
 
@@ -79,9 +78,6 @@ async function createCalendarImage(year, month, reminders) {
     const firstDay = new Date(year, month - 1, 1).getDay();
     const daysInMonth = new Date(year, month, 0).getDate();
     const today = new Date();
-
-    ctx.strokeStyle = '#40444B';
-    ctx.lineWidth = 2;
 
     for (let day = 1; day <= daysInMonth; day++) {
         const dayIndex = firstDay + day - 1;
@@ -99,38 +95,49 @@ async function createCalendarImage(year, month, reminders) {
                 d.getDate() === day;
         }).length;
 
-        // Highlight Today
-        if (year === today.getFullYear() && month === today.getMonth() + 1 && day === today.getDate()) {
-            ctx.fillStyle = '#5865F2'; // Discord Blurple
-            ctx.fillRect(x + 2, y + 2, cellWidth - 4, cellHeight - 4);
+        const isToday = year === today.getFullYear() && month === today.getMonth() + 1 && day === today.getDate();
+
+        // セル背景
+        if (isToday) {
+            // 今日 - ゴールド枠 + ダーク内側
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(x + 4, y + 4, cellWidth - 8, cellHeight - 8);
+            ctx.fillStyle = '#422006';
+            ctx.fillRect(x + 6, y + 6, cellWidth - 12, cellHeight - 12);
         } else if (reminderCount > 0) {
-            ctx.fillStyle = '#3A4047'; // Slightly lighter background
-            ctx.fillRect(x + 2, y + 2, cellWidth - 4, cellHeight - 4);
+            // リマインダーあり - 少し明るい背景
+            ctx.fillStyle = '#2a2520';
+            ctx.fillRect(x + 4, y + 4, cellWidth - 8, cellHeight - 8);
         }
 
-        // Box border
-        ctx.strokeRect(x, y, cellWidth, cellHeight);
+        // ボーダー
+        ctx.strokeStyle = isToday ? '#fbbf24' : '#4a4035';
+        ctx.lineWidth = isToday ? 2 : 1;
+        ctx.strokeRect(x + 4, y + 4, cellWidth - 8, cellHeight - 8);
 
-        // Date number
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = "30px 'MPLUS1'";
+        // 日付番号
+        if (col === 0) ctx.fillStyle = '#f87171';  // 日曜 - ソフトレッド
+        else if (col === 6) ctx.fillStyle = '#60a5fa';  // 土曜 - ソフトブルー
+        else ctx.fillStyle = isToday ? '#fbbf24' : '#e5e7eb';
+
+        ctx.font = "32px 'MPLUS1'";
         ctx.textAlign = 'right';
         ctx.textBaseline = 'top';
-        ctx.fillText(day.toString(), x + cellWidth - 10, y + 10);
+        ctx.fillText(day.toString(), x + cellWidth - 14, y + 12);
 
-        // Reminder indicator
+        // リマインダーインジケーター
         if (reminderCount > 0) {
-            ctx.fillStyle = '#FEE75C'; // Yellow
+            ctx.fillStyle = '#f59e0b';
             ctx.beginPath();
-            ctx.arc(x + 25, y + 55, 12, 0, Math.PI * 2);
+            ctx.arc(x + 28, y + 62, 14, 0, Math.PI * 2);
             ctx.fill();
 
-            // Count text
-            ctx.fillStyle = '#000000';
-            ctx.font = "16px 'MPLUS1'";
+            // カウント数字
+            ctx.fillStyle = '#1f1a15';
+            ctx.font = "18px 'MPLUS1'";
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(reminderCount.toString(), x + 25, y + 55);
+            ctx.fillText(reminderCount.toString(), x + 28, y + 62);
         }
     }
 

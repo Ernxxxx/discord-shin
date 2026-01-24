@@ -542,10 +542,15 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
 
         // そのチャンネルにいるのが1人だけ（最初の入室者）
         if (voiceChannel.members.size === 1) {
-            // テキストチャンネルを探す（システムチャンネル or 最初のテキストチャンネル）
             const guild = newState.guild;
-            const textChannel = guild.systemChannel ||
-                guild.channels.cache.find(ch => ch.isTextBased() && ch.permissionsFor(guild.members.me)?.has('SendMessages'));
+
+            // 「ドラクエ10」カテゴリ内の「雑談」チャンネルを探す
+            const category = guild.channels.cache.find(ch => ch.name === 'ドラクエ10' && ch.type === 4); // 4 = CategoryChannel
+            let textChannel = null;
+
+            if (category) {
+                textChannel = guild.channels.cache.find(ch => ch.name === '雑談' && ch.parentId === category.id);
+            }
 
             if (textChannel) {
                 textChannel.send('ディスコ上げときますねー');

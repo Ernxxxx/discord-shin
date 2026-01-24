@@ -222,7 +222,8 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates
     ]
 });
 
@@ -530,6 +531,26 @@ client.on(Events.MessageCreate, async message => {
         embeds.push(nextEmbed);
 
         message.reply({ embeds: embeds, files: files });
+    }
+});
+
+// ボイスチャンネル入室検知
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+    // ボイスチャンネルに入った場合（以前いなかった→今いる）
+    if (!oldState.channel && newState.channel) {
+        const voiceChannel = newState.channel;
+
+        // そのチャンネルにいるのが1人だけ（最初の入室者）
+        if (voiceChannel.members.size === 1) {
+            // テキストチャンネルを探す（システムチャンネル or 最初のテキストチャンネル）
+            const guild = newState.guild;
+            const textChannel = guild.systemChannel ||
+                guild.channels.cache.find(ch => ch.isTextBased() && ch.permissionsFor(guild.members.me)?.has('SendMessages'));
+
+            if (textChannel) {
+                textChannel.send('ディスコ上げときますねー');
+            }
+        }
     }
 });
 

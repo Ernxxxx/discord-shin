@@ -254,6 +254,10 @@ client.on(Events.MessageCreate, async message => {
         message.reply('うーーー★');
     }
 
+    if (message.content === '!t') {
+        message.reply('チムイベにあつ森はありだと思いますか？');
+    }
+
     // リマインダーコマンド
     if (message.content.startsWith('!remind ') || message.content.startsWith('!r ')) {
         const args = message.content.split(' ').slice(1).join(' ').trim();

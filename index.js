@@ -250,6 +250,10 @@ client.on(Events.MessageCreate, async message => {
         message.reply('最近ｵﾚにあたり強くない？');
     }
 
+    if (message.content === '!u') {
+        message.reply('うーーー★');
+    }
+
     // リマインダーコマンド
     if (message.content.startsWith('!remind ') || message.content.startsWith('!r ')) {
         const args = message.content.split(' ').slice(1).join(' ').trim();

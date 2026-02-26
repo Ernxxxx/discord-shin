@@ -1,7 +1,20 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Events, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const {
+    Client,
+    GatewayIntentBits,
+    Events,
+    EmbedBuilder,
+    AttachmentBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ChannelType,
+    PermissionFlagsBits
+} = require('discord.js');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const { execFile } = require('child_process');
 
 // ========== アストルティア防衛軍スケジュール ==========
 // 基準日時: 2025年1月22日 13:00 JST (周期Aの0時)
@@ -146,6 +159,1640 @@ function getRemindersForChannel(channelId) {
     return reminders.get(channelId);
 }
 
+// ========== Official feed relay (X + DQX news) ==========
+const OFFICIAL_TARGET_ID = (process.env.OFFICIAL_TARGET_ID || '1261502032037154976').trim();
+const OFFICIAL_POLL_INTERVAL_MINUTES = parseInt(process.env.OFFICIAL_POLL_INTERVAL_MINUTES || '5', 10);
+const OFFICIAL_POLL_INTERVAL_MS = (
+    Number.isFinite(OFFICIAL_POLL_INTERVAL_MINUTES) ? Math.max(1, OFFICIAL_POLL_INTERVAL_MINUTES) : 5
+) * 60 * 1000;
+const OFFICIAL_DQX_NEWS_URL = 'https://hiroba.dqx.jp/sc/news/information/';
+const OFFICIAL_DQX_TOPICS_URL = 'https://hiroba.dqx.jp/sc/topics/';
+const OFFICIAL_X_API_BASE_URL = process.env.X_API_BASE_URL || 'https://api.x.com/2';
+const OFFICIAL_X_ACCOUNT_URL = (process.env.X_API_ACCOUNT_URL || '').trim();
+const OFFICIAL_X_ACCOUNT_URLS = (process.env.X_API_ACCOUNT_URLS || '').trim();
+const OFFICIAL_X_DEFAULT_ACCOUNT_URLS = [
+    'https://x.com/dq_tora',
+    'https://x.com/DQ_X'
+];
+const OFFICIAL_FEED_STATE_FILE = path.join(__dirname, 'official_feed_state.json');
+const TEAM_EVENT_ENABLED = (process.env.TEAM_EVENT_ENABLED || '1') !== '0';
+const TEAM_EVENT_TARGET_CHANNEL_ID = (process.env.TEAM_EVENT_CHANNEL_ID || '').trim();
+const TEAM_EVENT_CHECK_INTERVAL_MINUTES = parseInt(process.env.TEAM_EVENT_CHECK_INTERVAL_MINUTES || '10', 10);
+const TEAM_EVENT_CHECK_INTERVAL_MS = (
+    Number.isFinite(TEAM_EVENT_CHECK_INTERVAL_MINUTES) ? Math.max(1, TEAM_EVENT_CHECK_INTERVAL_MINUTES) : 10
+) * 60 * 1000;
+const TEAM_EVENT_POST_HOUR_JST = parseInt(process.env.TEAM_EVENT_POST_HOUR_JST || '18', 10);
+const TEAM_EVENT_LEAD_DAYS = parseInt(process.env.TEAM_EVENT_LEAD_DAYS || '3', 10);
+const TEAM_EVENT_INTERVAL_DAYS_RAW = parseInt(process.env.TEAM_EVENT_INTERVAL_DAYS || '14', 10);
+const TEAM_EVENT_INTERVAL_DAYS = Number.isFinite(TEAM_EVENT_INTERVAL_DAYS_RAW)
+    ? Math.max(1, TEAM_EVENT_INTERVAL_DAYS_RAW)
+    : 14;
+const TEAM_EVENT_EPOCH_SATURDAY = (process.env.TEAM_EVENT_EPOCH_SATURDAY || '2026-03-07').trim();
+const TEAM_EVENT_STATE_FILE = path.join(__dirname, 'team_event_state.json');
+const TEAM_EVENT_TALLY_DELAY_HOURS = parseInt(process.env.TEAM_EVENT_TALLY_DELAY_HOURS || '24', 10);
+const TEAM_EVENT_REMINDER_DAYS_BEFORE = parseInt(process.env.TEAM_EVENT_REMINDER_DAYS_BEFORE || '3', 10);
+const TEAM_EVENT_REMINDER_HOURS_BEFORE = parseInt(process.env.TEAM_EVENT_REMINDER_HOURS_BEFORE || '2', 10);
+const TEAM_EVENT_HISTORY_MAX_RAW = parseInt(process.env.TEAM_EVENT_HISTORY_MAX || '120', 10);
+const TEAM_EVENT_HISTORY_MAX = Number.isFinite(TEAM_EVENT_HISTORY_MAX_RAW)
+    ? Math.max(1, TEAM_EVENT_HISTORY_MAX_RAW)
+    : 120;
+const TEAM_EVENT_BUTTON_PREFIX = 'team_event';
+const TEAM_EVENT_TIME_SLOTS = ['20:30', '21:00', '21:30', '22:00', '22:30'];
+const TEAM_EVENT_ACTIVITIES = [
+    '咎人8人同盟を周回',
+    '防衛軍を1時間周回',
+    'パニガルム・週課消化',
+    'コインボス持ち寄り',
+    'すごろくで遊ぶ',
+    '季節イベント消化',
+    '別ゲーで遊ぶ',
+    '大富豪で遊ぶ',
+    'チームかくれんぼ',
+    'ドレアコンテスト',
+    'チーム鬼ごっこ'
+];
+
+const officialFeedState = {
+    bootstrapped: {
+        x: false,
+        dqx: false
+    },
+    seenKeys: {
+        x: [],
+        dqx: []
+    }
+};
+
+const teamEventState = {
+    postedWeekendKeys: [],
+    proposals: {},
+    participationHistory: []
+};
+
+let officialFeedTargetChannel = null;
+let officialFeedPolling = false;
+let teamEventTargetChannel = null;
+let teamEventPosting = false;
+let teamEventMaintenanceRunning = false;
+
+function resolveXUsername(accountInput, fallbackUsername) {
+    const fallback = (fallbackUsername || 'DQ_X').trim();
+    const raw = (accountInput || '').trim();
+    if (!raw) return fallback;
+
+    const normalize = value => value.replace(/^@/, '').trim();
+    const isValid = value => /^[A-Za-z0-9_]{1,15}$/.test(value);
+
+    const direct = normalize(raw);
+    if (isValid(direct)) return direct;
+
+    try {
+        const parsed = new URL(raw);
+        const host = parsed.hostname.toLowerCase();
+        const isXHost = host === 'x.com' || host === 'www.x.com' || host === 'twitter.com' || host === 'www.twitter.com';
+        if (!isXHost) return fallback;
+
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        if (parts.length === 0) return fallback;
+
+        const username = normalize(parts[0]);
+        return isValid(username) ? username : fallback;
+    } catch (e) {
+        return fallback;
+    }
+}
+
+function resolveXProfileUrl(accountInput, username) {
+    const fallback = `https://x.com/${username}`;
+    const raw = (accountInput || '').trim();
+    if (!raw) return fallback;
+
+    try {
+        const parsed = new URL(raw);
+        const host = parsed.hostname.toLowerCase();
+        const isXHost = host === 'x.com' || host === 'www.x.com' || host === 'twitter.com' || host === 'www.twitter.com';
+        if (!isXHost) return fallback;
+        return `${parsed.protocol}//${parsed.host}/${username}`;
+    } catch (e) {
+        return fallback;
+    }
+}
+
+function parseXAccountInputs(rawValue) {
+    if (!rawValue) return [];
+    return rawValue
+        .split(/[\r\n,\s]+/)
+        .map(value => value.trim())
+        .filter(Boolean);
+}
+
+function getXMonitorAccounts() {
+    const dedup = new Set();
+    const accounts = [];
+
+    const addAccount = (input, fallbackUsername = 'DQ_X') => {
+        const username = resolveXUsername(input, fallbackUsername);
+        if (!username || dedup.has(username.toLowerCase())) return;
+        dedup.add(username.toLowerCase());
+        const profileUrl = resolveXProfileUrl(input, username);
+        const timelineUrl = `https://syndication.twitter.com/srv/timeline-profile/screen-name/${encodeURIComponent(username)}`;
+        accounts.push({ username, profileUrl, timelineUrl });
+    };
+
+    const configuredInputs = parseXAccountInputs(OFFICIAL_X_ACCOUNT_URLS);
+    if (configuredInputs.length > 0) {
+        configuredInputs.forEach(input => addAccount(input));
+        return accounts;
+    }
+
+    if (OFFICIAL_X_ACCOUNT_URL) {
+        addAccount(OFFICIAL_X_ACCOUNT_URL);
+    }
+
+    OFFICIAL_X_DEFAULT_ACCOUNT_URLS.forEach(input => addAccount(input));
+
+    return accounts;
+}
+
+function loadOfficialFeedState() {
+    if (!fs.existsSync(OFFICIAL_FEED_STATE_FILE)) return;
+
+    try {
+        const raw = fs.readFileSync(OFFICIAL_FEED_STATE_FILE, 'utf8');
+        const data = JSON.parse(raw);
+
+        if (data.bootstrapped && typeof data.bootstrapped === 'object') {
+            if (typeof data.bootstrapped.x === 'boolean') {
+                officialFeedState.bootstrapped.x = data.bootstrapped.x;
+            }
+            if (typeof data.bootstrapped.dqx === 'boolean') {
+                officialFeedState.bootstrapped.dqx = data.bootstrapped.dqx;
+            }
+        } else if (typeof data.initialized === 'boolean') {
+            // Backward compatibility with old state format.
+            officialFeedState.bootstrapped.x = data.initialized;
+            officialFeedState.bootstrapped.dqx = data.initialized;
+        }
+
+        if (data.seenKeys && typeof data.seenKeys === 'object') {
+            if (Array.isArray(data.seenKeys.x)) {
+                officialFeedState.seenKeys.x = data.seenKeys.x.slice(0, 200);
+            }
+            if (Array.isArray(data.seenKeys.dqx)) {
+                officialFeedState.seenKeys.dqx = data.seenKeys.dqx.slice(0, 200);
+            }
+        }
+    } catch (e) {
+        console.error('Failed to load official feed state:', e.message);
+    }
+}
+
+function saveOfficialFeedState() {
+    fs.writeFileSync(OFFICIAL_FEED_STATE_FILE, JSON.stringify(officialFeedState, null, 2), 'utf8');
+}
+
+function loadTeamEventState() {
+    if (!fs.existsSync(TEAM_EVENT_STATE_FILE)) return;
+
+    try {
+        const raw = fs.readFileSync(TEAM_EVENT_STATE_FILE, 'utf8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.postedWeekendKeys)) {
+            teamEventState.postedWeekendKeys = data.postedWeekendKeys.slice(0, 40);
+        }
+        if (data.proposals && typeof data.proposals === 'object') {
+            teamEventState.proposals = {};
+            for (const [weekendKey, record] of Object.entries(data.proposals)) {
+                teamEventState.proposals[weekendKey] = normalizeTeamEventProposalRecord(record, weekendKey);
+            }
+        }
+        if (Array.isArray(data.participationHistory)) {
+            teamEventState.participationHistory = data.participationHistory
+                .filter(entry => entry && typeof entry === 'object')
+                .slice(-TEAM_EVENT_HISTORY_MAX);
+        }
+    } catch (e) {
+        console.error('Failed to load team event state:', e.message);
+    }
+}
+
+function normalizeUserIdList(list) {
+    if (!Array.isArray(list)) return [];
+    const dedup = new Set();
+    const result = [];
+    list.forEach(value => {
+        if (typeof value !== 'string') return;
+        const v = value.trim();
+        if (!v || dedup.has(v)) return;
+        dedup.add(v);
+        result.push(v);
+    });
+    return result;
+}
+
+function normalizeTeamEventProposalRecord(record, weekendKeyFallback = '') {
+    const recordObj = (record && typeof record === 'object') ? record : {};
+    const weekendKey = typeof recordObj.weekendKey === 'string' && recordObj.weekendKey
+        ? recordObj.weekendKey
+        : weekendKeyFallback;
+
+    const primary = (recordObj.primary && typeof recordObj.primary === 'object') ? recordObj.primary : {};
+    const backup = (recordObj.backup && typeof recordObj.backup === 'object') ? recordObj.backup : {};
+    const attendance = (recordObj.attendance && typeof recordObj.attendance === 'object') ? recordObj.attendance : {};
+    const finalized = (recordObj.finalized && typeof recordObj.finalized === 'object') ? recordObj.finalized : {};
+    const reminders = (recordObj.reminders && typeof recordObj.reminders === 'object') ? recordObj.reminders : {};
+
+    return {
+        weekendKey,
+        weekendRangeLabel: typeof recordObj.weekendRangeLabel === 'string' ? recordObj.weekendRangeLabel : '',
+        channelId: typeof recordObj.channelId === 'string' ? recordObj.channelId : '',
+        proposalMessageId: typeof recordObj.proposalMessageId === 'string' ? recordObj.proposalMessageId : '',
+        createdAt: typeof recordObj.createdAt === 'string' ? recordObj.createdAt : new Date().toISOString(),
+        activities: Array.isArray(recordObj.activities) ? recordObj.activities.slice(0, 10) : [],
+        primary: {
+            dayCode: primary.dayCode === 'sun' ? 'sun' : 'sat',
+            dayLabel: typeof primary.dayLabel === 'string' ? primary.dayLabel : '土曜',
+            time: typeof primary.time === 'string' ? primary.time : '21:00',
+            votes: normalizeUserIdList(primary.votes)
+        },
+        backup: {
+            dayCode: backup.dayCode === 'sun' ? 'sun' : 'sat',
+            dayLabel: typeof backup.dayLabel === 'string' ? backup.dayLabel : '日曜',
+            time: typeof backup.time === 'string' ? backup.time : '22:00',
+            votes: normalizeUserIdList(backup.votes)
+        },
+        attendance: {
+            join: normalizeUserIdList(attendance.join),
+            maybe: normalizeUserIdList(attendance.maybe),
+            absent: normalizeUserIdList(attendance.absent)
+        },
+        finalized: {
+            slot: finalized.slot === 'backup' ? 'backup' : (finalized.slot === 'primary' ? 'primary' : null),
+            eventDateKey: typeof finalized.eventDateKey === 'string' ? finalized.eventDateKey : null,
+            eventLabel: typeof finalized.eventLabel === 'string' ? finalized.eventLabel : null,
+            eventAt: typeof finalized.eventAt === 'string' ? finalized.eventAt : null,
+            decidedAt: typeof finalized.decidedAt === 'string' ? finalized.decidedAt : null,
+            summaryMessageId: typeof finalized.summaryMessageId === 'string' ? finalized.summaryMessageId : null
+        },
+        reminders: {
+            d3Sent: reminders.d3Sent === true,
+            h2Sent: reminders.h2Sent === true
+        }
+    };
+}
+
+function saveTeamEventState() {
+    fs.writeFileSync(TEAM_EVENT_STATE_FILE, JSON.stringify(teamEventState, null, 2), 'utf8');
+}
+
+function getTeamEventProposalRecord(weekendKey) {
+    if (!teamEventState.proposals || typeof teamEventState.proposals !== 'object') {
+        teamEventState.proposals = {};
+    }
+    const record = teamEventState.proposals[weekendKey];
+    return record ? normalizeTeamEventProposalRecord(record, weekendKey) : null;
+}
+
+function upsertTeamEventProposalRecord(record) {
+    if (!record || !record.weekendKey) return;
+    if (!teamEventState.proposals || typeof teamEventState.proposals !== 'object') {
+        teamEventState.proposals = {};
+    }
+    teamEventState.proposals[record.weekendKey] = normalizeTeamEventProposalRecord(record, record.weekendKey);
+}
+
+function appendTeamEventHistory(entry) {
+    if (!entry || typeof entry !== 'object') return;
+    if (!Array.isArray(teamEventState.participationHistory)) {
+        teamEventState.participationHistory = [];
+    }
+    teamEventState.participationHistory.push(entry);
+    if (teamEventState.participationHistory.length > TEAM_EVENT_HISTORY_MAX) {
+        teamEventState.participationHistory = teamEventState.participationHistory.slice(-TEAM_EVENT_HISTORY_MAX);
+    }
+}
+
+function hasTeamEventPosted(weekendKey) {
+    return teamEventState.postedWeekendKeys.includes(weekendKey);
+}
+
+function markTeamEventPosted(weekendKey) {
+    if (teamEventState.postedWeekendKeys.includes(weekendKey)) return;
+    teamEventState.postedWeekendKeys.push(weekendKey);
+    if (teamEventState.postedWeekendKeys.length > 40) {
+        teamEventState.postedWeekendKeys = teamEventState.postedWeekendKeys.slice(-40);
+    }
+}
+
+function pad2(value) {
+    return String(value).padStart(2, '0');
+}
+
+function getJstParts(now = new Date()) {
+    const shifted = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+    return {
+        year: shifted.getUTCFullYear(),
+        month: shifted.getUTCMonth() + 1,
+        day: shifted.getUTCDate(),
+        hour: shifted.getUTCHours(),
+        dayOfWeek: shifted.getUTCDay()
+    };
+}
+
+function getJstDateKeyFromMs(ms) {
+    const shifted = new Date(ms + 9 * 60 * 60 * 1000);
+    const year = shifted.getUTCFullYear();
+    const month = pad2(shifted.getUTCMonth() + 1);
+    const day = pad2(shifted.getUTCDate());
+    return `${year}-${month}-${day}`;
+}
+
+function getCurrentJstMidnightMs(now = new Date()) {
+    const parts = getJstParts(now);
+    return Date.parse(
+        `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}T00:00:00+09:00`
+    );
+}
+
+function getTeamEventBaseSaturdayMs() {
+    const epochMs = Date.parse(`${TEAM_EVENT_EPOCH_SATURDAY}T00:00:00+09:00`);
+    return Number.isNaN(epochMs) ? Date.parse('2026-03-07T00:00:00+09:00') : epochMs;
+}
+
+function getJstDateKeyPlusDays(baseDateKey, diffDays) {
+    const baseMs = Date.parse(`${baseDateKey}T00:00:00+09:00`);
+    if (Number.isNaN(baseMs)) return baseDateKey;
+    return getJstDateKeyFromMs(baseMs + diffDays * 24 * 60 * 60 * 1000);
+}
+
+function getTeamEventDateTimeMs(weekendKey, dayCode, timeText) {
+    const eventDateKey = dayCode === 'sun'
+        ? getJstDateKeyPlusDays(weekendKey, 1)
+        : weekendKey;
+    const [hhRaw, mmRaw] = String(timeText || '').split(':');
+    const hh = parseInt(hhRaw, 10);
+    const mm = parseInt(mmRaw, 10);
+    const safeHh = Number.isFinite(hh) ? hh : 21;
+    const safeMm = Number.isFinite(mm) ? mm : 0;
+    const eventMs = Date.parse(`${eventDateKey}T${pad2(safeHh)}:${pad2(safeMm)}:00+09:00`);
+    return Number.isNaN(eventMs) ? null : eventMs;
+}
+
+function getAnnouncementSaturdayMsJst(now = new Date()) {
+    const leadDays = Number.isFinite(TEAM_EVENT_LEAD_DAYS) ? Math.max(0, TEAM_EVENT_LEAD_DAYS) : 3;
+    const dayMs = 24 * 60 * 60 * 1000;
+    const intervalMs = TEAM_EVENT_INTERVAL_DAYS * dayMs;
+    const currentDayMs = getCurrentJstMidnightMs(now);
+    const baseSaturdayMs = getTeamEventBaseSaturdayMs();
+    const approxIndex = Math.floor((currentDayMs - baseSaturdayMs) / intervalMs);
+
+    for (let offset = -1; offset <= 2; offset += 1) {
+        const saturdayMs = baseSaturdayMs + (approxIndex + offset) * intervalMs;
+        const announcementDayMs = saturdayMs - leadDays * dayMs;
+        if (announcementDayMs === currentDayMs) {
+            return saturdayMs;
+        }
+    }
+
+    return null;
+}
+
+function hashString(input) {
+    let hash = 2166136261;
+    for (let i = 0; i < input.length; i += 1) {
+        hash ^= input.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+}
+
+function pickUniqueFromList(list, count, seed) {
+    const pool = list.slice();
+    const picked = [];
+    let cursor = seed >>> 0;
+
+    while (picked.length < count && pool.length > 0) {
+        cursor = (Math.imul(cursor, 1664525) + 1013904223) >>> 0;
+        const idx = cursor % pool.length;
+        picked.push(pool.splice(idx, 1)[0]);
+    }
+
+    return picked;
+}
+
+function getHistoricalSlotScore(dayCode, timeText) {
+    const list = Array.isArray(teamEventState.participationHistory)
+        ? teamEventState.participationHistory
+        : [];
+    const filtered = list.filter(entry => (
+        entry &&
+        entry.dayCode === dayCode &&
+        entry.time === timeText &&
+        typeof entry.attendanceScore === 'number'
+    ));
+    if (filtered.length === 0) return 0;
+    const total = filtered.reduce((acc, entry) => acc + entry.attendanceScore, 0);
+    return total / filtered.length;
+}
+
+function getHistoricalDayScore(dayCode) {
+    const list = Array.isArray(teamEventState.participationHistory)
+        ? teamEventState.participationHistory
+        : [];
+    const filtered = list.filter(entry => (
+        entry &&
+        entry.dayCode === dayCode &&
+        typeof entry.attendanceScore === 'number'
+    ));
+    if (filtered.length === 0) return 0;
+    const total = filtered.reduce((acc, entry) => acc + entry.attendanceScore, 0);
+    return total / filtered.length;
+}
+
+function pickBestTimeForDay(dayCode, seed) {
+    let bestTime = null;
+    let bestScore = -1;
+    let bestCount = -1;
+
+    TEAM_EVENT_TIME_SLOTS.forEach(slot => {
+        const list = Array.isArray(teamEventState.participationHistory)
+            ? teamEventState.participationHistory
+            : [];
+        const filtered = list.filter(entry => (
+            entry &&
+            entry.dayCode === dayCode &&
+            entry.time === slot &&
+            typeof entry.attendanceScore === 'number'
+        ));
+        const count = filtered.length;
+        const score = count === 0
+            ? 0
+            : filtered.reduce((acc, entry) => acc + entry.attendanceScore, 0) / count;
+
+        if (
+            score > bestScore ||
+            (score === bestScore && count > bestCount) ||
+            (score === bestScore && count === bestCount && bestTime === null)
+        ) {
+            bestScore = score;
+            bestCount = count;
+            bestTime = slot;
+        }
+    });
+
+    if (bestScore > 0 && bestTime) {
+        return bestTime;
+    }
+
+    return TEAM_EVENT_TIME_SLOTS[seed % TEAM_EVENT_TIME_SLOTS.length];
+}
+
+function buildTeamEventProposal(weekendKey) {
+    const seed = hashString(`team-event-${weekendKey}`);
+    const saturdayScore = getHistoricalDayScore('sat');
+    const sundayScore = getHistoricalDayScore('sun');
+
+    let primaryDayCode = seed % 2 === 0 ? 'sat' : 'sun';
+    if (saturdayScore !== sundayScore) {
+        primaryDayCode = saturdayScore > sundayScore ? 'sat' : 'sun';
+    }
+    const backupDayCode = primaryDayCode === 'sat' ? 'sun' : 'sat';
+    const primaryDay = primaryDayCode === 'sat' ? '土曜' : '日曜';
+    const backupDay = backupDayCode === 'sat' ? '土曜' : '日曜';
+    const primaryTime = pickBestTimeForDay(primaryDayCode, seed);
+    const backupTime = pickBestTimeForDay(backupDayCode, seed + 2);
+    const activities = pickUniqueFromList(TEAM_EVENT_ACTIVITIES, 3, seed ^ 0x9e3779b9);
+    const saturdayMs = Date.parse(`${weekendKey}T00:00:00+09:00`);
+    const sundayKey = getJstDateKeyFromMs(saturdayMs + 24 * 60 * 60 * 1000);
+
+    return {
+        weekendKey,
+        weekendRangeLabel: `${weekendKey} - ${sundayKey} (JST)`,
+        primaryDayCode,
+        primaryDay,
+        primaryTime,
+        backupDayCode,
+        backupDay,
+        backupTime,
+        activities
+    };
+}
+
+function canChannelEmbedLinks(channel) {
+    const me = channel.guild?.members?.me || null;
+    const perms = me ? channel.permissionsFor(me) : null;
+    return perms ? perms.has(PermissionFlagsBits.EmbedLinks) : true;
+}
+
+function buildTeamEventActivitiesText(record) {
+    if (!Array.isArray(record.activities) || record.activities.length === 0) {
+        return '1. 未設定';
+    }
+    return record.activities.map((item, idx) => `${idx + 1}. ${item}`).join('\n');
+}
+
+function buildTeamEventTimeVoteText(record) {
+    return [
+        `第1候補: ${record.primary.dayLabel} ${record.primary.time} (${record.primary.votes.length}票)`,
+        `第2候補: ${record.backup.dayLabel} ${record.backup.time} (${record.backup.votes.length}票)`
+    ].join('\n');
+}
+
+function buildTeamEventAttendanceVoteText(record) {
+    return [
+        `参加: ${record.attendance.join.length}人`,
+        `未定: ${record.attendance.maybe.length}人`,
+        `不参加: ${record.attendance.absent.length}人`
+    ].join('\n');
+}
+
+function buildTeamEventProposalPlainText(record) {
+    const lines = [
+        '【チームイベント提案（隔週）】',
+        `対象週: ${record.weekendRangeLabel}`,
+        '',
+        '集合時間案',
+        buildTeamEventTimeVoteText(record),
+        '',
+        '出欠（自動集計）',
+        buildTeamEventAttendanceVoteText(record),
+        '',
+        'やること案',
+        buildTeamEventActivitiesText(record),
+        ''
+    ];
+
+    if (record.finalized.slot && record.finalized.eventLabel) {
+        lines.push(`確定済み: ${record.finalized.eventLabel}`);
+    } else {
+        lines.push(`投票受付中: 24時間後に自動確定`);
+    }
+
+    return lines.join('\n');
+}
+
+function buildTeamEventProposalEmbed(record) {
+    const statusText = record.finalized.slot && record.finalized.eventLabel
+        ? `確定済み: ${record.finalized.eventLabel}`
+        : '投票受付中: 24時間後に自動確定';
+
+    return new EmbedBuilder()
+        .setColor(record.finalized.slot ? 0x2ECC71 : 0xF39C12)
+        .setTitle('チームイベント提案（隔週）')
+        .setDescription(`対象週: ${record.weekendRangeLabel}`)
+        .addFields(
+            { name: '集合時間案', value: buildTeamEventTimeVoteText(record) },
+            { name: '出欠（自動集計）', value: buildTeamEventAttendanceVoteText(record) },
+            { name: 'やること案', value: buildTeamEventActivitiesText(record) },
+            { name: '状態', value: statusText }
+        );
+}
+
+function buildTeamEventButtonCustomId(weekendKey, category, value) {
+    return `${TEAM_EVENT_BUTTON_PREFIX}|${weekendKey}|${category}|${value}`;
+}
+
+function buildTeamEventProposalComponents(record) {
+    const disabled = !!record.finalized.slot;
+    const slotRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'slot', 'primary'))
+            .setLabel(`第1候補 ${record.primary.votes.length}`)
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(disabled),
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'slot', 'backup'))
+            .setLabel(`第2候補 ${record.backup.votes.length}`)
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(disabled)
+    );
+    const attendanceRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'attendance', 'join'))
+            .setLabel(`参加 ${record.attendance.join.length}`)
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(disabled),
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'attendance', 'maybe'))
+            .setLabel(`未定 ${record.attendance.maybe.length}`)
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(disabled),
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'attendance', 'absent'))
+            .setLabel(`不参加 ${record.attendance.absent.length}`)
+            .setStyle(ButtonStyle.Danger)
+            .setDisabled(disabled)
+    );
+    return [slotRow, attendanceRow];
+}
+
+function createTeamEventProposalRecord(channelId, proposal) {
+    return normalizeTeamEventProposalRecord({
+        weekendKey: proposal.weekendKey,
+        weekendRangeLabel: proposal.weekendRangeLabel,
+        channelId,
+        proposalMessageId: '',
+        createdAt: new Date().toISOString(),
+        activities: Array.isArray(proposal.activities) ? proposal.activities.slice(0, 10) : [],
+        primary: {
+            dayCode: proposal.primaryDayCode === 'sun' ? 'sun' : 'sat',
+            dayLabel: proposal.primaryDay || '土曜',
+            time: proposal.primaryTime || '21:00',
+            votes: []
+        },
+        backup: {
+            dayCode: proposal.backupDayCode === 'sun' ? 'sun' : 'sat',
+            dayLabel: proposal.backupDay || '日曜',
+            time: proposal.backupTime || '22:00',
+            votes: []
+        },
+        attendance: {
+            join: [],
+            maybe: [],
+            absent: []
+        },
+        finalized: {
+            slot: null,
+            eventDateKey: null,
+            eventLabel: null,
+            eventAt: null,
+            decidedAt: null,
+            summaryMessageId: null
+        },
+        reminders: {
+            d3Sent: false,
+            h2Sent: false
+        }
+    }, proposal.weekendKey);
+}
+
+function parseTeamEventButtonCustomId(customId) {
+    const parts = String(customId || '').split('|');
+    if (parts.length !== 4) return null;
+    if (parts[0] !== TEAM_EVENT_BUTTON_PREFIX) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(parts[1])) return null;
+    if (parts[2] !== 'slot' && parts[2] !== 'attendance') return null;
+    if (parts[2] === 'slot' && !['primary', 'backup'].includes(parts[3])) return null;
+    if (parts[2] === 'attendance' && !['join', 'maybe', 'absent'].includes(parts[3])) return null;
+    return {
+        weekendKey: parts[1],
+        category: parts[2],
+        value: parts[3]
+    };
+}
+
+function assignTeamEventVoteSingleChoice(record, category, value, userId) {
+    const removeUser = list => {
+        const idx = list.indexOf(userId);
+        if (idx >= 0) list.splice(idx, 1);
+    };
+    const addUser = list => {
+        if (!list.includes(userId)) list.push(userId);
+    };
+
+    if (category === 'slot') {
+        const wasPrimary = record.primary.votes.includes(userId);
+        const wasBackup = record.backup.votes.includes(userId);
+        removeUser(record.primary.votes);
+        removeUser(record.backup.votes);
+        if ((value === 'primary' && wasPrimary) || (value === 'backup' && wasBackup)) {
+            // Pressing the same button again cancels selection in this category.
+            return true;
+        }
+        if (value === 'backup') {
+            addUser(record.backup.votes);
+            return true;
+        }
+        if (value === 'primary') {
+            addUser(record.primary.votes);
+            return true;
+        }
+        return false;
+    }
+
+    if (category === 'attendance') {
+        const wasJoin = record.attendance.join.includes(userId);
+        const wasMaybe = record.attendance.maybe.includes(userId);
+        const wasAbsent = record.attendance.absent.includes(userId);
+        removeUser(record.attendance.join);
+        removeUser(record.attendance.maybe);
+        removeUser(record.attendance.absent);
+        if (
+            (value === 'join' && wasJoin) ||
+            (value === 'maybe' && wasMaybe) ||
+            (value === 'absent' && wasAbsent)
+        ) {
+            // Pressing the same button again cancels selection in this category.
+            return true;
+        }
+        if (value === 'join') {
+            addUser(record.attendance.join);
+            return true;
+        }
+        if (value === 'maybe') {
+            addUser(record.attendance.maybe);
+            return true;
+        }
+        if (value === 'absent') {
+            addUser(record.attendance.absent);
+            return true;
+        }
+        return false;
+    }
+
+    return false;
+}
+
+function decideTeamEventFinalSlot(record) {
+    const primaryVotes = record.primary.votes.length;
+    const backupVotes = record.backup.votes.length;
+    if (primaryVotes !== backupVotes) {
+        return primaryVotes > backupVotes ? 'primary' : 'backup';
+    }
+
+    const primaryHistory = getHistoricalSlotScore(record.primary.dayCode, record.primary.time);
+    const backupHistory = getHistoricalSlotScore(record.backup.dayCode, record.backup.time);
+    if (primaryHistory !== backupHistory) {
+        return primaryHistory >= backupHistory ? 'primary' : 'backup';
+    }
+
+    return 'primary';
+}
+
+function getTeamEventSlotRecord(record, slot) {
+    return slot === 'backup' ? record.backup : record.primary;
+}
+
+function buildTeamEventSlotVoteSummary(record) {
+    return [
+        `第1候補 ${record.primary.dayLabel} ${record.primary.time}: ${record.primary.votes.length}票`,
+        `第2候補 ${record.backup.dayLabel} ${record.backup.time}: ${record.backup.votes.length}票`
+    ].join('\n');
+}
+
+function getTeamEventAttendanceScore(record) {
+    return record.attendance.join.length + record.attendance.maybe.length * 0.5;
+}
+
+function hasSeenOfficialKey(source, key) {
+    if (!officialFeedState.seenKeys[source]) {
+        officialFeedState.seenKeys[source] = [];
+    }
+    return officialFeedState.seenKeys[source].includes(key);
+}
+
+function markOfficialKeySeen(source, key) {
+    if (!officialFeedState.seenKeys[source]) {
+        officialFeedState.seenKeys[source] = [];
+    }
+    if (!officialFeedState.seenKeys[source].includes(key)) {
+        officialFeedState.seenKeys[source].push(key);
+        if (officialFeedState.seenKeys[source].length > 200) {
+            officialFeedState.seenKeys[source].splice(0, officialFeedState.seenKeys[source].length - 200);
+        }
+    }
+}
+
+function decodeHtmlEntities(text) {
+    if (!text) return '';
+
+    return text
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#x2F;/gi, '/')
+        .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(parseInt(num, 10)))
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function fetchText(url, extraHeaders = {}) {
+    return new Promise((resolve, reject) => {
+        const req = https.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) DiscordShinBot/1.0',
+                ...extraHeaders
+            }
+        }, res => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                const redirectUrl = new URL(res.headers.location, url).toString();
+                res.resume();
+                resolve(fetchText(redirectUrl, extraHeaders));
+                return;
+            }
+
+            if (res.statusCode !== 200) {
+                res.resume();
+                reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+                return;
+            }
+
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        });
+
+        req.setTimeout(15000, () => req.destroy(new Error(`Timeout for ${url}`)));
+        req.on('error', reject);
+    });
+}
+
+async function fetchJson(url, extraHeaders = {}) {
+    const raw = await fetchText(url, extraHeaders);
+    return JSON.parse(raw);
+}
+
+function buildQueryString(params) {
+    return Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== null && value !== '')
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+        .join('&');
+}
+
+function fetchTextViaCurl(url) {
+    return new Promise((resolve, reject) => {
+        execFile(
+            'curl',
+            ['-L', '-s', '-A', 'Mozilla/5.0', url],
+            { timeout: 20000, maxBuffer: 10 * 1024 * 1024 },
+            (error, stdout) => {
+                if (error) {
+                    reject(new Error(`curl failed for ${url}: ${error.message}`));
+                    return;
+                }
+                if (!stdout) {
+                    reject(new Error(`curl empty response for ${url}`));
+                    return;
+                }
+                resolve(stdout);
+            }
+        );
+    });
+}
+
+function parseDqxNewsItems(html) {
+    const items = [];
+    const rowRegex = /<tr>\s*<td class="news"[^>]*>([\s\S]*?)<\/td>[\s\S]*?<td class="date"><div>([^<]+)<\/div><\/td>\s*<\/tr>/g;
+    let match;
+
+    while ((match = rowRegex.exec(html)) !== null) {
+        const newsCellHtml = match[1];
+        const dateText = (match[2] || '').trim();
+        const linkMatch = newsCellHtml.match(/<a class="newsListLnk" href="([^"]+)">([\s\S]*?)<\/a>/);
+        if (!linkMatch) continue;
+
+        const categoryMatch = newsCellHtml.match(/<b class="news-subject-category">([\s\S]*?)<\/b>/);
+        const category = categoryMatch
+            ? decodeHtmlEntities(categoryMatch[1].replace(/<[^>]*>/g, ''))
+            : '';
+
+        const href = linkMatch[1].trim();
+        const titleText = decodeHtmlEntities(linkMatch[2].replace(/<[^>]*>/g, ''));
+        const title = category ? `${category} ${titleText}` : titleText;
+        const url = href.startsWith('http') ? href : `https://hiroba.dqx.jp${href}`;
+        const key = href.replace(/\/+$/, '');
+        const publishedAt = new Date(`${dateText.replace(' ', 'T')}:00+09:00`);
+
+        items.push({
+            source: 'dqx',
+            key,
+            title,
+            url,
+            publishedAt: Number.isNaN(publishedAt.getTime()) ? null : publishedAt
+        });
+    }
+
+    return items.sort((a, b) => {
+        const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+        const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+        return aTime - bTime;
+    });
+}
+
+function parseDqxTopicsItems(html) {
+    const items = [];
+    const linkRegex = /<a class="newsListLnk" href="([^"]+)">([\s\S]*?)<\/a>/g;
+    let match;
+
+    while ((match = linkRegex.exec(html)) !== null) {
+        const href = match[1].trim();
+        if (!href.includes('/sc/topics/detail/')) continue;
+
+        const rawTitle = decodeHtmlEntities(match[2].replace(/<[^>]*>/g, ''));
+        if (!rawTitle) continue;
+
+        const url = href.startsWith('http') ? href : `https://hiroba.dqx.jp${href}`;
+        const key = href.replace(/\/+$/, '');
+        const dateMatch = rawTitle.match(/[（(]\s*(\d{4})\/(\d{1,2})\/(\d{1,2})(?:\s*更新)?\s*[）)]/);
+        const publishedAt = dateMatch
+            ? new Date(`${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}T00:00:00+09:00`)
+            : null;
+        const title = `[トピックス] ${rawTitle}`;
+
+        items.push({
+            source: 'dqx',
+            key,
+            title,
+            url,
+            publishedAt: publishedAt && !Number.isNaN(publishedAt.getTime()) ? publishedAt : null
+        });
+    }
+
+    const dedup = new Set();
+    return items
+        .filter(item => {
+            if (dedup.has(item.key)) return false;
+            dedup.add(item.key);
+            return true;
+        })
+        .sort((a, b) => {
+            const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+            const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+            return aTime - bTime;
+        });
+}
+
+function parseXTimelineItems(html, account) {
+    const items = [];
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+    if (!nextDataMatch) return items;
+
+    let data;
+    try {
+        data = JSON.parse(nextDataMatch[1]);
+    } catch (e) {
+        console.error('Failed to parse X timeline data:', e.message);
+        return items;
+    }
+
+    const entries = data?.props?.pageProps?.timeline?.entries;
+    if (!Array.isArray(entries)) return items;
+
+    entries.forEach(entry => {
+        if (entry?.type !== 'tweet') return;
+
+        const tweet = entry?.content?.tweet;
+        if (!tweet || !tweet.id_str) return;
+
+        const rawText = (typeof tweet.full_text === 'string' && tweet.full_text.trim())
+            ? tweet.full_text
+            : (tweet.text || '');
+        const cleanText = rawText.replace(/\s+/g, ' ').trim();
+        const publishedAt = tweet.created_at ? new Date(tweet.created_at) : null;
+
+        items.push({
+            source: 'x',
+            key: tweet.id_str,
+            title: cleanText || '(no text)',
+            url: tweet.permalink ? `https://x.com${tweet.permalink}` : `${account.profileUrl}/status/${tweet.id_str}`,
+            publishedAt: publishedAt && !Number.isNaN(publishedAt.getTime()) ? publishedAt : null
+        });
+    });
+
+    return items.sort((a, b) => {
+        const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+        const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+        return aTime - bTime;
+    });
+}
+
+async function fetchXApiItemsForAccount(account, bearerToken) {
+    const authHeaders = {
+        Authorization: `Bearer ${bearerToken}`
+    };
+
+    const userUrl = `${OFFICIAL_X_API_BASE_URL}/users/by/username/${encodeURIComponent(account.username)}?${buildQueryString({
+        'user.fields': 'id'
+    })}`;
+
+    const userResp = await fetchJson(userUrl, authHeaders);
+    const userId = userResp?.data?.id;
+    if (!userId) {
+        throw new Error(`X API user lookup failed for ${account.username}`);
+    }
+
+    const tweetsUrl = `${OFFICIAL_X_API_BASE_URL}/users/${userId}/tweets?${buildQueryString({
+        max_results: 5,
+        exclude: 'retweets,replies',
+        'tweet.fields': 'created_at'
+    })}`;
+
+    const tweetsResp = await fetchJson(tweetsUrl, authHeaders);
+    const tweets = Array.isArray(tweetsResp?.data) ? tweetsResp.data : [];
+
+    return tweets
+        .map(tweet => {
+            const text = (tweet?.text || '').replace(/\s+/g, ' ').trim();
+            const publishedAt = tweet?.created_at ? new Date(tweet.created_at) : null;
+            return {
+                source: 'x',
+                key: tweet.id,
+                title: text || '(no text)',
+                url: `${account.profileUrl}/status/${tweet.id}`,
+                publishedAt: publishedAt && !Number.isNaN(publishedAt.getTime()) ? publishedAt : null
+            };
+        })
+        .filter(item => !!item.key)
+        .sort((a, b) => {
+            const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+            const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+            return aTime - bTime;
+        });
+}
+
+async function fetchXApiItems() {
+    const bearerToken = process.env.X_BEARER_TOKEN;
+    if (!bearerToken) return [];
+
+    const allItems = [];
+    const accounts = getXMonitorAccounts();
+
+    for (const account of accounts) {
+        try {
+            const items = await fetchXApiItemsForAccount(account, bearerToken);
+            allItems.push(...items);
+        } catch (e) {
+            console.error(`Official X API fetch failed for ${account.username}:`, e.message);
+        }
+    }
+
+    return allItems.sort((a, b) => {
+        const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+        const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+        return aTime - bTime;
+    });
+}
+
+function formatDateForEmbed(date) {
+    if (!date) return 'N/A';
+    return new Intl.DateTimeFormat('ja-JP', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    }).format(date);
+}
+
+async function resolveOfficialFeedTargetChannel(readyClient) {
+    const isSendableTextChannel = (channel, member) => {
+        if (!channel || !channel.isTextBased()) return false;
+
+        // Ignore voice/stage/forum; use only standard text/announcement channels.
+        if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildAnnouncement) {
+            return false;
+        }
+
+        const perms = channel.permissionsFor(member);
+        return !!(
+            perms &&
+            perms.has(PermissionFlagsBits.ViewChannel) &&
+            perms.has(PermissionFlagsBits.SendMessages)
+        );
+    };
+
+    try {
+        const targetAsChannel = await readyClient.channels.fetch(OFFICIAL_TARGET_ID);
+        if (targetAsChannel && targetAsChannel.isTextBased() && targetAsChannel.isSendable()) {
+            return targetAsChannel;
+        }
+    } catch (e) {
+        // ignore
+    }
+
+    try {
+        const guild = await readyClient.guilds.fetch(OFFICIAL_TARGET_ID);
+        await guild.channels.fetch();
+        const me = guild.members.me || await guild.members.fetchMe();
+
+        if (guild.systemChannel && isSendableTextChannel(guild.systemChannel, me)) {
+            return guild.systemChannel;
+        }
+
+        const preferredNames = ['bot-log', 'status-alerts', 'daily-digest', 'weekly-digest', '情報共有', '雑談'];
+        let fallbackChannel = null;
+
+        for (const name of preferredNames) {
+            const found = guild.channels.cache.find(ch => ch.name === name && isSendableTextChannel(ch, me));
+            if (found) {
+                fallbackChannel = found;
+                break;
+            }
+        }
+
+        if (!fallbackChannel) {
+            fallbackChannel = guild.channels.cache
+                .filter(ch => isSendableTextChannel(ch, me))
+                .sort((a, b) => a.position - b.position)[0] || null;
+        }
+
+        return fallbackChannel || null;
+    } catch (e) {
+        console.error('Failed to resolve official feed target:', e.message);
+        return null;
+    }
+}
+
+async function resolveTeamEventTargetChannel(readyClient) {
+    if (TEAM_EVENT_TARGET_CHANNEL_ID) {
+        try {
+            const direct = await readyClient.channels.fetch(TEAM_EVENT_TARGET_CHANNEL_ID);
+            if (direct && direct.isTextBased() && direct.isSendable()) {
+                return direct;
+            }
+        } catch (e) {
+            console.error('Failed to resolve team event target channel:', e.message);
+        }
+    }
+
+    return resolveOfficialFeedTargetChannel(readyClient);
+}
+
+async function sendTeamEventProposal(channel, record) {
+    const components = buildTeamEventProposalComponents(record);
+    if (!canChannelEmbedLinks(channel)) {
+        return channel.send({
+            content: buildTeamEventProposalPlainText(record),
+            components
+        });
+    }
+
+    return channel.send({
+        embeds: [buildTeamEventProposalEmbed(record)],
+        components
+    });
+}
+
+function buildTeamEventProposalEditPayload(channel, record) {
+    const components = buildTeamEventProposalComponents(record);
+    if (!canChannelEmbedLinks(channel)) {
+        return {
+            content: buildTeamEventProposalPlainText(record),
+            embeds: [],
+            components
+        };
+    }
+
+    return {
+        embeds: [buildTeamEventProposalEmbed(record)],
+        components
+    };
+}
+
+async function resolveTeamEventChannelById(readyClient, channelId) {
+    if (!channelId) return null;
+    try {
+        const channel = await readyClient.channels.fetch(channelId);
+        if (channel && channel.isTextBased() && channel.isSendable()) {
+            return channel;
+        }
+    } catch (e) {
+        console.error('Failed to resolve team event channel by id:', e.message);
+    }
+    return null;
+}
+
+async function updateTeamEventProposalMessage(readyClient, record) {
+    if (!record.channelId || !record.proposalMessageId) return;
+    const channel = await resolveTeamEventChannelById(readyClient, record.channelId);
+    if (!channel || !channel.messages || typeof channel.messages.fetch !== 'function') return;
+
+    try {
+        const message = await channel.messages.fetch(record.proposalMessageId);
+        if (!message) return;
+        await message.edit(buildTeamEventProposalEditPayload(channel, record));
+    } catch (e) {
+        console.error(`Failed to update team event proposal message: ${record.weekendKey}`, e.message);
+    }
+}
+
+async function sendTeamEventFinalizedSummary(channel, record) {
+    const slotRecord = getTeamEventSlotRecord(record, record.finalized.slot);
+    const finalizedLabel = record.finalized.eventLabel || `${slotRecord.dayLabel} ${slotRecord.time} (JST)`;
+    const voteSummary = buildTeamEventSlotVoteSummary(record);
+    const attendanceSummary = buildTeamEventAttendanceVoteText(record);
+    const activitiesText = buildTeamEventActivitiesText(record);
+
+    if (!canChannelEmbedLinks(channel)) {
+        const text = [
+            '【チームイベント日時確定】',
+            `対象週: ${record.weekendRangeLabel}`,
+            `確定日時: ${finalizedLabel}`,
+            '',
+            '候補投票結果',
+            voteSummary,
+            '',
+            '出欠（自動集計）',
+            attendanceSummary,
+            '',
+            'やること案',
+            activitiesText
+        ].join('\n');
+        return channel.send(text);
+    }
+
+    const embed = new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('チームイベント日時確定')
+        .setDescription(`対象週: ${record.weekendRangeLabel}`)
+        .addFields(
+            { name: '確定日時', value: finalizedLabel },
+            { name: '候補投票結果', value: voteSummary },
+            { name: '出欠（自動集計）', value: attendanceSummary },
+            { name: 'やること案', value: activitiesText }
+        );
+
+    return channel.send({ embeds: [embed] });
+}
+
+async function sendTeamEventReminder(channel, record, reminderType) {
+    const reminderDays = Number.isFinite(TEAM_EVENT_REMINDER_DAYS_BEFORE)
+        ? Math.max(0, TEAM_EVENT_REMINDER_DAYS_BEFORE)
+        : 3;
+    const reminderHours = Number.isFinite(TEAM_EVENT_REMINDER_HOURS_BEFORE)
+        ? Math.max(0, TEAM_EVENT_REMINDER_HOURS_BEFORE)
+        : 2;
+    const label = reminderType === 'h2'
+        ? `${reminderHours}時間前`
+        : `${reminderDays}日前`;
+    const finalizedLabel = record.finalized.eventLabel || '日時確定済み';
+    const attendanceSummary = buildTeamEventAttendanceVoteText(record);
+    const activitiesText = buildTeamEventActivitiesText(record);
+
+    if (!canChannelEmbedLinks(channel)) {
+        const text = [
+            `【チームイベントリマインド（${label}）】`,
+            `開催日時: ${finalizedLabel}`,
+            '',
+            '出欠（自動集計）',
+            attendanceSummary,
+            '',
+            'やること案',
+            activitiesText
+        ].join('\n');
+        await channel.send(text);
+        return;
+    }
+
+    const embed = new EmbedBuilder()
+        .setColor(0x3498DB)
+        .setTitle(`チームイベントリマインド（${label}）`)
+        .setDescription(`開催日時: ${finalizedLabel}`)
+        .addFields(
+            { name: '出欠（自動集計）', value: attendanceSummary },
+            { name: 'やること案', value: activitiesText }
+        );
+
+    await channel.send({ embeds: [embed] });
+}
+
+async function finalizeTeamEventProposal(readyClient, record, nowMs) {
+    if (record.finalized.slot) return false;
+
+    const finalSlot = decideTeamEventFinalSlot(record);
+    const finalSlotRecord = getTeamEventSlotRecord(record, finalSlot);
+    const eventDateKey = finalSlotRecord.dayCode === 'sun'
+        ? getJstDateKeyPlusDays(record.weekendKey, 1)
+        : record.weekendKey;
+    const eventAtMs = getTeamEventDateTimeMs(record.weekendKey, finalSlotRecord.dayCode, finalSlotRecord.time);
+
+    record.finalized.slot = finalSlot;
+    record.finalized.eventDateKey = eventDateKey;
+    record.finalized.eventLabel = `${eventDateKey} ${finalSlotRecord.dayLabel} ${finalSlotRecord.time} (JST)`;
+    record.finalized.eventAt = eventAtMs ? new Date(eventAtMs).toISOString() : null;
+    record.finalized.decidedAt = new Date(nowMs).toISOString();
+
+    appendTeamEventHistory({
+        weekendKey: record.weekendKey,
+        decidedAt: record.finalized.decidedAt,
+        dayCode: finalSlotRecord.dayCode,
+        time: finalSlotRecord.time,
+        attendanceScore: getTeamEventAttendanceScore(record),
+        joinCount: record.attendance.join.length,
+        maybeCount: record.attendance.maybe.length,
+        absentCount: record.attendance.absent.length
+    });
+
+    const channel = await resolveTeamEventChannelById(readyClient, record.channelId);
+    if (channel) {
+        try {
+            const message = await sendTeamEventFinalizedSummary(channel, record);
+            if (message && message.id) {
+                record.finalized.summaryMessageId = message.id;
+            }
+        } catch (e) {
+            console.error(`Failed to send team event finalized summary: ${record.weekendKey}`, e.message);
+        }
+    }
+
+    await updateTeamEventProposalMessage(readyClient, record);
+    upsertTeamEventProposalRecord(record);
+    return true;
+}
+
+async function processTeamEventReminders(readyClient, record, nowMs) {
+    if (!record.finalized.slot || !record.finalized.eventAt) {
+        return false;
+    }
+
+    const eventAtMs = Date.parse(record.finalized.eventAt);
+    if (Number.isNaN(eventAtMs)) {
+        return false;
+    }
+
+    const reminderDays = Number.isFinite(TEAM_EVENT_REMINDER_DAYS_BEFORE)
+        ? Math.max(0, TEAM_EVENT_REMINDER_DAYS_BEFORE)
+        : 3;
+    const reminderHours = Number.isFinite(TEAM_EVENT_REMINDER_HOURS_BEFORE)
+        ? Math.max(0, TEAM_EVENT_REMINDER_HOURS_BEFORE)
+        : 2;
+    const daysBeforeMs = reminderDays * 24 * 60 * 60 * 1000;
+    const hoursBeforeMs = reminderHours * 60 * 60 * 1000;
+    let changed = false;
+    const channel = await resolveTeamEventChannelById(readyClient, record.channelId);
+    if (!channel) {
+        return false;
+    }
+
+    if (
+        !record.reminders.d3Sent &&
+        nowMs >= eventAtMs - daysBeforeMs &&
+        nowMs < eventAtMs - hoursBeforeMs
+    ) {
+        try {
+            await sendTeamEventReminder(channel, record, 'd3');
+            record.reminders.d3Sent = true;
+            changed = true;
+        } catch (e) {
+            console.error(`Failed to send team event ${reminderDays}day reminder: ${record.weekendKey}`, e.message);
+        }
+    }
+
+    if (
+        !record.reminders.h2Sent &&
+        nowMs >= eventAtMs - hoursBeforeMs &&
+        nowMs < eventAtMs
+    ) {
+        try {
+            await sendTeamEventReminder(channel, record, 'h2');
+            record.reminders.h2Sent = true;
+            changed = true;
+        } catch (e) {
+            console.error(`Failed to send team event ${reminderHours}hour reminder: ${record.weekendKey}`, e.message);
+        }
+    }
+
+    if (changed) {
+        upsertTeamEventProposalRecord(record);
+    }
+    return changed;
+}
+
+async function runTeamEventMaintenance(readyClient) {
+    if (!TEAM_EVENT_ENABLED || teamEventMaintenanceRunning) return;
+    teamEventMaintenanceRunning = true;
+
+    try {
+        const nowMs = Date.now();
+        const tallyDelayHours = Number.isFinite(TEAM_EVENT_TALLY_DELAY_HOURS)
+            ? Math.max(0, TEAM_EVENT_TALLY_DELAY_HOURS)
+            : 24;
+        const tallyDelayMs = tallyDelayHours * 60 * 60 * 1000;
+        const proposalEntries = Object.entries(teamEventState.proposals || {})
+            .map(([weekendKey, record]) => normalizeTeamEventProposalRecord(record, weekendKey))
+            .sort((a, b) => a.weekendKey.localeCompare(b.weekendKey));
+        let stateChanged = false;
+
+        for (const record of proposalEntries) {
+            if (!record.finalized.slot) {
+                const createdAtMs = Date.parse(record.createdAt);
+                if (!Number.isNaN(createdAtMs) && nowMs >= createdAtMs + tallyDelayMs) {
+                    const finalized = await finalizeTeamEventProposal(readyClient, record, nowMs);
+                    if (finalized) {
+                        stateChanged = true;
+                    }
+                }
+            }
+
+            const reminderChanged = await processTeamEventReminders(readyClient, record, nowMs);
+            if (reminderChanged) {
+                stateChanged = true;
+            }
+        }
+
+        if (stateChanged) {
+            saveTeamEventState();
+        }
+    } catch (e) {
+        console.error('Team event maintenance failed:', e.message);
+    } finally {
+        teamEventMaintenanceRunning = false;
+    }
+}
+
+async function maybePostTeamEventProposal(readyClient) {
+    if (!TEAM_EVENT_ENABLED || teamEventPosting) return;
+    if (!Number.isFinite(TEAM_EVENT_POST_HOUR_JST)) return;
+
+    const now = new Date();
+    const parts = getJstParts(now);
+    if (parts.hour < TEAM_EVENT_POST_HOUR_JST) return;
+
+    const saturdayMs = getAnnouncementSaturdayMsJst(now);
+    if (saturdayMs === null) return;
+
+    const weekendKey = getJstDateKeyFromMs(saturdayMs);
+    if (hasTeamEventPosted(weekendKey) || getTeamEventProposalRecord(weekendKey)) return;
+
+    teamEventPosting = true;
+    try {
+        if (!teamEventTargetChannel) {
+            teamEventTargetChannel = await resolveTeamEventTargetChannel(readyClient);
+        }
+
+        if (!teamEventTargetChannel) {
+            console.warn('Team event target channel is not found');
+            return;
+        }
+
+        const proposal = buildTeamEventProposal(weekendKey);
+        const record = createTeamEventProposalRecord(teamEventTargetChannel.id, proposal);
+        const message = await sendTeamEventProposal(teamEventTargetChannel, record);
+        record.proposalMessageId = message.id;
+        upsertTeamEventProposalRecord(record);
+        markTeamEventPosted(weekendKey);
+        saveTeamEventState();
+        console.log(`Team event proposal posted: ${weekendKey}`);
+    } catch (e) {
+        console.error('Team event proposal failed:', e.message);
+        teamEventTargetChannel = null;
+    } finally {
+        teamEventPosting = false;
+    }
+}
+
+async function sendOfficialFeedItem(channel, item) {
+    const isX = item.source === 'x';
+    if (isX) {
+        // For X updates, post only the tweet URL.
+        await channel.send(item.url);
+        return;
+    }
+
+    const title = 'DQX Official News';
+    const description = item.title.length > 350 ? `${item.title.slice(0, 350)}...` : item.title;
+    const me = channel.guild?.members?.me || null;
+    const perms = me ? channel.permissionsFor(me) : null;
+    const canEmbed = perms ? perms.has(PermissionFlagsBits.EmbedLinks) : true;
+
+    if (!canEmbed) {
+        const text = `【${title}】\n${description}\n${item.url}\n${formatDateForEmbed(item.publishedAt)}`;
+        await channel.send(text);
+        return;
+    }
+
+    const embed = new EmbedBuilder()
+        .setColor(0x00A86B)
+        .setTitle(title)
+        .setDescription(description)
+        .addFields(
+            { name: 'Link', value: item.url },
+            { name: 'Time', value: formatDateForEmbed(item.publishedAt), inline: true }
+        )
+        .setTimestamp(item.publishedAt || new Date());
+
+    await channel.send({ embeds: [embed] });
+}
+
+async function pollOfficialFeeds(readyClient) {
+    if (officialFeedPolling) return;
+    officialFeedPolling = true;
+
+    try {
+        if (!officialFeedTargetChannel) {
+            officialFeedTargetChannel = await resolveOfficialFeedTargetChannel(readyClient);
+        }
+
+        if (!officialFeedTargetChannel) {
+            console.warn('Official feed target channel is not found');
+            return;
+        }
+
+        const sourceItems = {
+            dqx: [],
+            x: []
+        };
+
+        try {
+            const dqxHtml = await fetchText(OFFICIAL_DQX_NEWS_URL);
+            const newsItems = parseDqxNewsItems(dqxHtml).slice(-5);
+            const topicsHtml = await fetchText(OFFICIAL_DQX_TOPICS_URL);
+            const topicsItems = parseDqxTopicsItems(topicsHtml).slice(-5);
+            sourceItems.dqx = [...newsItems, ...topicsItems].sort((a, b) => {
+                const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+                const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+                return aTime - bTime;
+            });
+        } catch (e) {
+            console.error('Official DQX feed fetch failed:', e.message);
+        }
+
+        if (process.env.X_BEARER_TOKEN) {
+            try {
+                sourceItems.x = (await fetchXApiItems()).slice(-5);
+                console.log('Official X feed fetched via API');
+            } catch (e) {
+                console.error('Official X API fetch failed:', e.message);
+            }
+        }
+
+        if (sourceItems.x.length === 0) {
+            const xFallbackItems = [];
+
+            for (const account of getXMonitorAccounts()) {
+                try {
+                    const xHtml = await fetchText(account.timelineUrl);
+                    xFallbackItems.push(...parseXTimelineItems(xHtml, account).slice(-5));
+                } catch (e) {
+                    console.error(`Official X feed fetch failed for ${account.username}:`, e.message);
+                    try {
+                        const xHtml = await fetchTextViaCurl(account.timelineUrl);
+                        xFallbackItems.push(...parseXTimelineItems(xHtml, account).slice(-5));
+                        console.log(`Official X feed fetched via curl fallback for ${account.username}`);
+                    } catch (curlError) {
+                        console.error(`Official X curl fallback failed for ${account.username}:`, curlError.message);
+                    }
+                }
+            }
+
+            sourceItems.x = xFallbackItems.sort((a, b) => {
+                const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+                const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+                return aTime - bTime;
+            });
+        }
+
+        const candidates = [...sourceItems.dqx, ...sourceItems.x].sort((a, b) => {
+            const aTime = a.publishedAt ? a.publishedAt.getTime() : 0;
+            const bTime = b.publishedAt ? b.publishedAt.getTime() : 0;
+            return aTime - bTime;
+        });
+
+        if (candidates.length === 0) {
+            return;
+        }
+
+        let stateChanged = false;
+
+        for (const source of ['dqx', 'x']) {
+            const items = sourceItems[source];
+            if (!items || items.length === 0) {
+                continue;
+            }
+
+            if (!officialFeedState.bootstrapped[source]) {
+                items.forEach(item => markOfficialKeySeen(source, item.key));
+                officialFeedState.bootstrapped[source] = true;
+                stateChanged = true;
+                console.log(`Official feed bootstrap completed for ${source}`);
+            }
+        }
+
+        let postedCount = 0;
+        for (const item of candidates) {
+            if (!officialFeedState.bootstrapped[item.source]) {
+                continue;
+            }
+
+            if (hasSeenOfficialKey(item.source, item.key)) {
+                continue;
+            }
+
+            await sendOfficialFeedItem(officialFeedTargetChannel, item);
+            markOfficialKeySeen(item.source, item.key);
+            stateChanged = true;
+            postedCount += 1;
+        }
+
+        if (stateChanged || postedCount > 0) {
+            saveOfficialFeedState();
+        }
+
+        if (postedCount > 0) {
+            console.log(`Official feed posted: ${postedCount}`);
+        }
+    } catch (e) {
+        console.error('Official feed poll failed:', e.message);
+    } finally {
+        officialFeedPolling = false;
+    }
+}
+
 // Create a new client instance with necessary intents
 const client = new Client({
     intents: [
@@ -162,6 +1809,8 @@ client.once(Events.ClientReady, readyClient => {
 
     // 永続化データを読み込み
     loadReminders();
+    loadOfficialFeedState();
+    loadTeamEventState();
 
     // リマインダーチェック（1分ごと）
     setInterval(() => {
@@ -185,6 +1834,69 @@ client.once(Events.ClientReady, readyClient => {
             }
         });
     }, 60000); // 60秒ごとにチェック
+
+    pollOfficialFeeds(readyClient);
+    setInterval(() => {
+        pollOfficialFeeds(readyClient);
+    }, OFFICIAL_POLL_INTERVAL_MS);
+
+    maybePostTeamEventProposal(readyClient);
+    runTeamEventMaintenance(readyClient);
+    setInterval(() => {
+        maybePostTeamEventProposal(readyClient);
+        runTeamEventMaintenance(readyClient);
+    }, TEAM_EVENT_CHECK_INTERVAL_MS);
+});
+
+client.on(Events.InteractionCreate, async interaction => {
+    if (!interaction.isButton()) return;
+
+    try {
+        const parsed = parseTeamEventButtonCustomId(interaction.customId);
+        if (!parsed) return;
+
+        const record = getTeamEventProposalRecord(parsed.weekendKey);
+        if (!record) {
+            await interaction.reply({ content: 'この投票は期限切れです。', ephemeral: true });
+            return;
+        }
+
+        if (record.proposalMessageId && interaction.message?.id !== record.proposalMessageId) {
+            await interaction.reply({ content: '別メッセージの投票です。', ephemeral: true });
+            return;
+        }
+
+        if (record.finalized.slot) {
+            await interaction.reply({ content: 'この提案はすでに確定済みです。', ephemeral: true });
+            return;
+        }
+
+        const channel = interaction.channel;
+        if (!channel || !channel.isTextBased()) {
+            await interaction.reply({ content: '投票先チャンネルを取得できませんでした。', ephemeral: true });
+            return;
+        }
+
+        const updated = assignTeamEventVoteSingleChoice(record, parsed.category, parsed.value, interaction.user.id);
+        if (!updated) {
+            await interaction.reply({ content: '投票内容の解析に失敗しました。', ephemeral: true });
+            return;
+        }
+
+        await interaction.deferUpdate();
+        upsertTeamEventProposalRecord(record);
+        saveTeamEventState();
+        if (interaction.message && typeof interaction.message.edit === 'function') {
+            await interaction.message.edit(buildTeamEventProposalEditPayload(channel, record));
+        }
+    } catch (e) {
+        console.error('Team event interaction failed:', e.message);
+        if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ content: '投票更新に失敗しました。もう一度押してください。', ephemeral: true });
+        } else if (interaction.deferred) {
+            await interaction.followUp({ content: '投票更新に失敗しました。もう一度押してください。', ephemeral: true });
+        }
+    }
 });
 
 // Listen for messages

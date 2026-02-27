@@ -1282,7 +1282,7 @@ function parseTeamEventAvailabilityButtonCustomId(customId) {
     if (category === 'day') {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
     } else if (category === 'cmd') {
-        if (!['list', 'clear', 'unknown', 'known'].includes(value)) return null;
+        if (!['list', 'all', 'clear', 'unknown', 'known'].includes(value)) return null;
     } else {
         return null;
     }
@@ -1401,6 +1401,11 @@ function buildTeamEventAvailabilityPanelComponents(record) {
             .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'list'))
             .setLabel('登録一覧')
             .setStyle(ButtonStyle.Secondary)
+            .setDisabled(disabled),
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'all'))
+            .setLabel('全部出席')
+            .setStyle(ButtonStyle.Primary)
             .setDisabled(disabled),
         new ButtonBuilder()
             .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'clear'))
@@ -2486,6 +2491,16 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         if (record.availabilityCursor && typeof record.availabilityCursor === 'object') {
             delete record.availabilityCursor[userId];
         }
+        await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        return;
+    }
+
+    if (parsed.category === 'cmd' && parsed.value === 'all') {
+        const entry = ensureTeamEventAvailabilityEntry(record, userId);
+        entry.slots = buildTeamEventWindowDateKeys(record.weekendKey)
+            .map(dateKey => getTeamEventAvailabilityDateSlotKey(dateKey));
+        entry.unknown = false;
+        entry.updatedAt = new Date().toISOString();
         await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
         return;
     }

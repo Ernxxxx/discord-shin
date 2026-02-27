@@ -868,6 +868,59 @@ function buildTeamEventNextScheduleText(now = new Date()) {
     return lines.join('\n');
 }
 
+function resolveTeamEventHistoryDateKey(entry) {
+    if (isValidDateKey(entry?.eventDateKey)) {
+        return entry.eventDateKey;
+    }
+    if (!isValidDateKey(entry?.weekendKey)) {
+        return null;
+    }
+    const dayCode = String(entry?.dayCode || '').toLowerCase();
+    if (!TEAM_EVENT_DAY_CODES.includes(dayCode)) {
+        return null;
+    }
+    const dateKeys = buildTeamEventWindowDateKeys(entry.weekendKey);
+    return dateKeys.find(dateKey => getTeamEventDayInfoFromDateKey(dateKey).dayCode === dayCode) || null;
+}
+
+function buildTeamEventHistoryText(countText = '') {
+    const parsedCount = parseInt(String(countText || '').trim(), 10);
+    const requestedCount = Number.isFinite(parsedCount) ? parsedCount : 8;
+    const count = Math.max(1, Math.min(20, requestedCount));
+    const list = Array.isArray(teamEventState.participationHistory)
+        ? teamEventState.participationHistory
+        : [];
+    const items = list.slice(-count).reverse();
+
+    if (items.length === 0) {
+        return 'チームイベント履歴はまだありません。';
+    }
+
+    const lines = [`チームイベント履歴（最新${items.length}件）`];
+    items.forEach((entry, idx) => {
+        const dayCode = String(entry?.dayCode || '').toLowerCase();
+        const dayLabel = TEAM_EVENT_DAY_LABELS[dayCode] || dayCode || '不明';
+        const time = normalizeTimeText(entry?.time, TEAM_EVENT_FIXED_TIME);
+        const dateKey = resolveTeamEventHistoryDateKey(entry) || '日付不明';
+        const weekendRangeLabel = isValidDateKey(entry?.weekendKey)
+            ? getTeamEventWindowRangeLabel(entry.weekendKey)
+            : '対象週不明';
+        const joinCount = Number.isFinite(entry?.joinCount) ? entry.joinCount : 0;
+        const maybeCount = Number.isFinite(entry?.maybeCount) ? entry.maybeCount : 0;
+        const absentCount = Number.isFinite(entry?.absentCount) ? entry.absentCount : 0;
+        const decidedAt = entry?.decidedAt ? new Date(entry.decidedAt) : null;
+        const decidedAtLabel = decidedAt && !Number.isNaN(decidedAt.getTime())
+            ? `${formatDateForEmbed(decidedAt)} JST`
+            : '不明';
+        lines.push(
+            `${idx + 1}. ${dateKey} ${dayLabel} ${time} | 参加:${joinCount} 未定:${maybeCount} 不参加:${absentCount}`
+        );
+        lines.push(`   対象週: ${weekendRangeLabel} / 確定: ${decidedAtLabel}`);
+    });
+
+    return lines.join('\n');
+}
+
 function hashString(input) {
     let hash = 2166136261;
     for (let i = 0; i < input.length; i += 1) {
@@ -2693,6 +2746,7 @@ function buildTeamEventCommandUsageText() {
     return [
         'チームイベント可用日コマンド',
         '`!te next` 次回シフト登録開始日とイベント週を表示',
+        '`!te history [件数]` 過去イベント履歴を表示（最大20件）',
         '`!te status` 現在の対象週と設定を表示',
         '`!te panel` 可用日ボタンパネルを再送信',
         '`!te recalc` 可用日を反映して候補を再計算',
@@ -2750,6 +2804,11 @@ async function handleTeamEventCommandMessage(message) {
 
     if (sub === 'next' || sub === 'schedule') {
         await message.reply(buildTeamEventNextScheduleText());
+        return true;
+    }
+
+    if (sub === 'history') {
+        await message.reply(buildTeamEventHistoryText(args[1] || ''));
         return true;
     }
 
@@ -2918,7 +2977,7 @@ client.on(Events.MessageCreate, async message => {
                 { name: '🎮 ネタ系', value: '`!n` ねけます\n`!m` もう無理\n`!mo` どうせｵﾚがﾋｰﾗｰ\n`!s` 申し訳なさございません\n`!d` ディスコ上げときますねー\n`!i` いいよ。ｵﾚ要らない\n`!a` あーいーいーいー\n`!si` 最近ｵﾚにあたり強くない？', inline: true },
                 { name: '📅 スケジュール', value: '`!b` 防衛軍スケジュール', inline: true },
                 { name: '⏰ リマインダー', value: '`!remind 21:00` 時刻指定\n`!remind 1/25 21:00` 日付指定\n`!remind 2025/1/25 21:00` 年指定\n`!remind 30m` 分指定\n`!r` 一覧 `!r delete 1` 削除\n`!r clear` 全削除', inline: true },
-                { name: '🎉 イベント', value: '`!3` 3月イベント告知\n`!te next` 次回シフト登録開始/イベント週\n`!te status` 現在の対象週\n`!te avail list` 自分の可用日\n`!te help` チームイベント詳細', inline: true }
+                { name: '🎉 イベント', value: '`!3` 3月イベント告知\n`!te next` 次回シフト登録開始/イベント週\n`!te history` 過去イベント履歴\n`!te status` 現在の対象週\n`!te avail list` 自分の可用日\n`!te help` チームイベント詳細', inline: true }
             )
             .setFooter({ text: 'Shin Bot' });
         message.reply({ embeds: [helpEmbed] });

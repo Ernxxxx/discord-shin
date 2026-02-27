@@ -1,8 +1,21 @@
 ﻿# Handoff - discord_shin
 
-更新: 2026-02-27 14:59:33
+更新: 2026-02-27 15:58:42
 
 ## 今回やったこと
+- `!te history [件数]` コマンドを追加（`index.js`）
+  - 過去イベント履歴（確定日/曜日/時刻/参加・未定・不参加人数/対象週/確定日時）を最新順で表示
+  - 件数指定対応（デフォルト8件、最大20件）
+- `!te` ヘルプ表示を更新
+  - `!te help` の usage に `!te history [件数]` を追加
+  - `!help` のイベント欄に `!te history` を追加
+- ローカル検証
+  - `node --check index.js` 成功
+- 本番反映を実施（`!help` 更新・`!te next` 追加を含む）
+  - `scp` / `sftp` は `Connection reset` で失敗
+  - 代替として `https://raw.githubusercontent.com/Ernxxxx/discord-shin/main/index.js` を本番へ直接取得
+  - 本番 `node --check /home/ubuntu/discord-bot/index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実施（restart `127` / `online`）
 - `!help` 表示にチームイベント案内を追加（`index.js`）
   - `!te next` / `!te status` / `!te avail list` / `!te help` をイベント欄に追記
 - `!te next` / `!te schedule` コマンドを追加（`index.js`）
@@ -128,7 +141,7 @@
 ## 現在の状態
 - ローカル `node --check index.js` は成功
 - 本番 `node --check /home/ubuntu/discord-bot/index.js` は成功
-- 本番 `discord-bot` は `online`（PM2）
+- 本番 `discord-bot` は `online`（PM2, restart `127`）
 - 投票開始リード日数は `10日`（対象週の月曜10日前の18:00 JST以降に投稿）
 - 確定ロジックは「票数優先 / 同票は土日優先 / 同カテゴリ同票はランダム」
 - 可用日パネルに `登録人数: X人` を表示

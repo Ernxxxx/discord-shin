@@ -2471,13 +2471,12 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         entry.updatedAt = new Date().toISOString();
         cleanupTeamEventAvailabilityEntry(record, userId);
 
-        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        const suffix = slotChanged ? '\n候補日を再計算しました。' : '';
+        await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
         const dayLabel = getTeamEventAvailabilityDateLabel(parsed.value);
         await interaction.editReply(
             exists
-                ? `可用日を解除しました: ${dayLabel}${suffix}`
-                : `可用日を登録しました: ${dayLabel}${suffix}`
+                ? `可用日を解除しました: ${dayLabel}`
+                : `可用日を登録しました: ${dayLabel}`
         );
         return;
     }
@@ -2489,12 +2488,8 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         if (record.availabilityCursor && typeof record.availabilityCursor === 'object') {
             delete record.availabilityCursor[userId];
         }
-        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        await interaction.editReply(
-            slotChanged
-                ? '可用日を全削除し、候補日を再計算しました。'
-                : '可用日を全削除しました。'
-        );
+        await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        await interaction.editReply('可用日を全削除しました。');
         return;
     }
 
@@ -2503,12 +2498,8 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         entry.slots = [];
         entry.unknown = true;
         entry.updatedAt = new Date().toISOString();
-        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        await interaction.editReply(
-            slotChanged
-                ? 'シフト未確定として登録し、候補日を再計算しました。'
-                : 'シフト未確定として登録しました。'
-        );
+        await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        await interaction.editReply('シフト未確定として登録しました。');
         return;
     }
 
@@ -2517,12 +2508,8 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         entry.unknown = false;
         entry.updatedAt = new Date().toISOString();
         cleanupTeamEventAvailabilityEntry(record, userId);
-        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        await interaction.editReply(
-            slotChanged
-                ? 'シフト未確定を解除し、候補日を再計算しました。'
-                : 'シフト未確定を解除しました。'
-        );
+        await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        await interaction.editReply('シフト未確定を解除しました。');
         return;
     }
 
@@ -2723,14 +2710,12 @@ async function handleTeamEventCommandMessage(message) {
         if (record.availability && typeof record.availability === 'object') {
             delete record.availability[userId];
         }
-        const { slotChanged } = recalculateTeamEventProposalSlots(record);
+        recalculateTeamEventProposalSlots(record);
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
         await updateTeamEventAvailabilityPanelMessage(message.client, record);
-        await message.reply(slotChanged
-            ? '可用日を削除し、候補日を再計算しました。'
-            : '可用日を削除しました。');
+        await message.reply('可用日を削除しました。');
         return true;
     }
 
@@ -2739,14 +2724,12 @@ async function handleTeamEventCommandMessage(message) {
         entry.slots = [];
         entry.unknown = true;
         entry.updatedAt = new Date().toISOString();
-        const { slotChanged } = recalculateTeamEventProposalSlots(record);
+        recalculateTeamEventProposalSlots(record);
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
         await updateTeamEventAvailabilityPanelMessage(message.client, record);
-        await message.reply(slotChanged
-            ? 'シフト未確定として登録しました。候補を再計算しました。'
-            : 'シフト未確定として登録しました。');
+        await message.reply('シフト未確定として登録しました。');
         return true;
     }
 
@@ -2755,14 +2738,12 @@ async function handleTeamEventCommandMessage(message) {
         entry.unknown = false;
         entry.updatedAt = new Date().toISOString();
         cleanupTeamEventAvailabilityEntry(record, userId);
-        const { slotChanged } = recalculateTeamEventProposalSlots(record);
+        recalculateTeamEventProposalSlots(record);
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
         await updateTeamEventAvailabilityPanelMessage(message.client, record);
-        await message.reply(slotChanged
-            ? 'シフト未確定フラグを解除し、候補を再計算しました。'
-            : 'シフト未確定フラグを解除しました。');
+        await message.reply('シフト未確定フラグを解除しました。');
         return true;
     }
 
@@ -2809,7 +2790,7 @@ async function handleTeamEventCommandMessage(message) {
 
     const afterEntry = record.availability?.[userId];
     const afterCount = Array.isArray(afterEntry?.slots) ? afterEntry.slots.length : 0;
-    const { slotChanged } = recalculateTeamEventProposalSlots(record);
+    recalculateTeamEventProposalSlots(record);
     upsertTeamEventProposalRecord(record);
     saveTeamEventState();
     await updateTeamEventProposalMessage(message.client, record);
@@ -2824,9 +2805,7 @@ async function handleTeamEventCommandMessage(message) {
         return true;
     }
 
-    await message.reply(slotChanged
-        ? `可用日を更新しました: ${parsedSlot.dateKey}\n候補日を再計算しました。`
-        : `可用日を更新しました: ${parsedSlot.dateKey}`);
+    await message.reply(`可用日を更新しました: ${parsedSlot.dateKey}`);
     return true;
 }
 

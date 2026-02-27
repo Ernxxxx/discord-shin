@@ -1,2 +1,14 @@
 node_modules/
 .env
+# Local scratch / ad-hoc files
+debug_*.js
+send_*.js
+remote_patch_*.py
+index_upload.txt
+tmp_*.txt
+team_event_state_test.json
+task_plan.md
+test_calendar.js
+test_*.png
+designs/
+nul

@@ -182,7 +182,7 @@ const TEAM_EVENT_CHECK_INTERVAL_MS = (
     Number.isFinite(TEAM_EVENT_CHECK_INTERVAL_MINUTES) ? Math.max(1, TEAM_EVENT_CHECK_INTERVAL_MINUTES) : 10
 ) * 60 * 1000;
 const TEAM_EVENT_POST_HOUR_JST = parseInt(process.env.TEAM_EVENT_POST_HOUR_JST || '18', 10);
-const TEAM_EVENT_LEAD_DAYS = parseInt(process.env.TEAM_EVENT_LEAD_DAYS || '3', 10);
+const TEAM_EVENT_LEAD_DAYS = parseInt(process.env.TEAM_EVENT_LEAD_DAYS || '10', 10);
 const TEAM_EVENT_INTERVAL_DAYS_RAW = parseInt(process.env.TEAM_EVENT_INTERVAL_DAYS || '14', 10);
 const TEAM_EVENT_INTERVAL_DAYS = Number.isFinite(TEAM_EVENT_INTERVAL_DAYS_RAW)
     ? Math.max(1, TEAM_EVENT_INTERVAL_DAYS_RAW)
@@ -753,7 +753,7 @@ function sortTeamEventScoredCandidates(a, b) {
 }
 
 function getAnnouncementSaturdayMsJst(now = new Date()) {
-    const leadDays = Number.isFinite(TEAM_EVENT_LEAD_DAYS) ? Math.max(0, TEAM_EVENT_LEAD_DAYS) : 3;
+    const leadDays = Number.isFinite(TEAM_EVENT_LEAD_DAYS) ? Math.max(0, TEAM_EVENT_LEAD_DAYS) : 10;
     const dayMs = 24 * 60 * 60 * 1000;
     const intervalMs = TEAM_EVENT_INTERVAL_DAYS * dayMs;
     const currentDayMs = getCurrentJstMidnightMs(now);
@@ -762,7 +762,13 @@ function getAnnouncementSaturdayMsJst(now = new Date()) {
 
     for (let offset = -1; offset <= 2; offset += 1) {
         const saturdayMs = baseSaturdayMs + (approxIndex + offset) * intervalMs;
-        const announcementDayMs = saturdayMs - leadDays * dayMs;
+        const weekendKey = getJstDateKeyFromMs(saturdayMs);
+        const weekStartKey = getTeamEventWeekStartDateKey(weekendKey);
+        const weekStartMs = Date.parse(`${weekStartKey}T00:00:00+09:00`);
+        if (Number.isNaN(weekStartMs)) {
+            continue;
+        }
+        const announcementDayMs = weekStartMs - leadDays * dayMs;
         if (announcementDayMs === currentDayMs) {
             return saturdayMs;
         }
@@ -1150,13 +1156,14 @@ function decideTeamEventFinalSlot(record) {
         return primaryVotes > backupVotes ? 'primary' : 'backup';
     }
 
-    const primaryHistory = getHistoricalDayScore(record.primary.dayCode);
-    const backupHistory = getHistoricalDayScore(record.backup.dayCode);
-    if (primaryHistory !== backupHistory) {
-        return primaryHistory >= backupHistory ? 'primary' : 'backup';
+    const weekendDayCodes = new Set(['sat', 'sun']);
+    const primaryIsWeekend = weekendDayCodes.has(record.primary.dayCode);
+    const backupIsWeekend = weekendDayCodes.has(record.backup.dayCode);
+    if (primaryIsWeekend !== backupIsWeekend) {
+        return primaryIsWeekend ? 'primary' : 'backup';
     }
 
-    return 'primary';
+    return Math.random() < 0.5 ? 'primary' : 'backup';
 }
 
 function getTeamEventSlotRecord(record, slot) {
@@ -1319,6 +1326,24 @@ function getTeamEventAvailabilityDateCounts(record) {
     return counts;
 }
 
+function getTeamEventAvailabilityRegisteredUserCount(record) {
+    const validDateSet = new Set(buildTeamEventWindowDateKeys(record.weekendKey));
+    let count = 0;
+
+    for (const entry of Object.values(record.availability || {})) {
+        const slots = Array.isArray(entry?.slots) ? entry.slots : [];
+        const hasRegisteredDate = slots.some(slotKey => {
+            const parsed = parseTeamEventSlotKey(slotKey);
+            return !!(parsed && validDateSet.has(parsed.dateKey));
+        });
+        if (hasRegisteredDate) {
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
 function getTeamEventAvailabilityDateLabel(dateKey) {
     const info = getTeamEventDayInfoFromDateKey(dateKey);
     const [yyyy, mm, dd] = dateKey.split('-');
@@ -1336,6 +1361,7 @@ function getTeamEventAvailabilityDateSlotKey(dateKey) {
 
 function buildTeamEventAvailabilityPanelPlainText(record) {
     const dateCounts = getTeamEventAvailabilityDateCounts(record);
+    const registeredCount = getTeamEventAvailabilityRegisteredUserCount(record);
     const dateLines = buildTeamEventWindowDateKeys(record.weekendKey)
         .map(dateKey => `${getTeamEventAvailabilityDateLabel(dateKey)}: ${dateCounts[dateKey] || 0}人`);
     return [
@@ -1343,6 +1369,7 @@ function buildTeamEventAvailabilityPanelPlainText(record) {
         `対象週: ${record.weekendRangeLabel}`,
         `投票締切: ${buildTeamEventVoteCloseLabel(record)}`,
         `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`,
+        `登録人数: ${registeredCount}人`,
         '',
         buildTeamEventShiftPromptText(record),
         '',
@@ -1360,6 +1387,7 @@ function buildTeamEventAvailabilityPanelPlainText(record) {
 
 function buildTeamEventAvailabilityPanelEmbed(record) {
     const dateCounts = getTeamEventAvailabilityDateCounts(record);
+    const registeredCount = getTeamEventAvailabilityRegisteredUserCount(record);
     const dateSummary = buildTeamEventWindowDateKeys(record.weekendKey)
         .map(dateKey => `${getTeamEventAvailabilityDateLabel(dateKey)}: ${dateCounts[dateKey] || 0}人`)
         .join('\n');
@@ -1370,6 +1398,7 @@ function buildTeamEventAvailabilityPanelEmbed(record) {
             `対象週: ${record.weekendRangeLabel}`,
             `投票締切: ${buildTeamEventVoteCloseLabel(record)}`,
             `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`,
+            `登録人数: ${registeredCount}人`,
             '',
             '日別集計:',
             dateSummary,

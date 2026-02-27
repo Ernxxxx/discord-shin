@@ -1,8 +1,62 @@
 ﻿# Handoff - discord_shin
 
-更新: 2026-02-26 13:46:39
+更新: 2026-02-27 14:30:11
 
 ## 今回やったこと
+- 公式情報リレー（DQXニュース/DQXトピックス/X）特化の NotebookLM ドキュメントを新規作成
+  - `C:\メモ\Projects\discord_shin_OfficialFeed_NotebookLM.md`
+  - 取得元、取得順、重複防止、投稿形式、主要設定、障害時確認手順を整理
+- NotebookLM導線へ公式情報リレー資料を追加
+  - `C:\メモ\Projects\discord_shin.md`
+  - `C:\メモ\Projects\discord_shin_NotebookLM.md`
+- リポジトリ作業ツリーを整理
+  - 未追跡の一時ファイル（debug/send/tmp/patch用スクリプト、画像、検証JSONなど）を削除
+  - `.gitignore` にローカル検証・一時ファイルの除外ルールを追加
+- チームイベント運用ルールをローカル検証
+  - 月曜基準「10日前」投稿判定: `2026-02-20 -> 2026-03-07`, `2026-03-06 -> 2026-03-21` を確認
+  - 同票確定ロジック: 土日優先と同カテゴリランダム（500回試行で両候補が選ばれる）を確認
+  - 可用日上位2候補: 票数上位（例: `04/02=3`, `03/30=2`）が primary/backup へ反映されることを確認
+- イベント詳細特化の NotebookLM ドキュメントを新規作成
+  - `C:\メモ\Projects\discord_shin_EventDetail_NotebookLM.md`
+  - 提案/確定/リマインドの表示項目、日時ルール、確定条件、質問テンプレ、画像生成向け要点を整理
+- 既存ドキュメントの導線更新
+  - `C:\メモ\Projects\discord_shin.md` に新規ドキュメントへの参照追加
+  - `C:\メモ\Projects\discord_shin_NotebookLM.md` に関連ドキュメントとして追記
+- 可用日パネルに「登録人数（ユニーク）」表示を追加（`index.js`）
+  - `getTeamEventAvailabilityRegisteredUserCount(record)` を追加
+  - PlainText/Embed の両方に `登録人数: X人` を表示
+- 本番反映（登録人数表示）
+  - `tmpfiles` 経由で `/home/ubuntu/discord-bot/index.js` を更新
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実施、`online` 確認（restart `126`）
+- NotebookLM連携向けドキュメントを整備
+  - `C:\メモ\Projects\discord_shin_NotebookLM.md` を新規作成
+  - `C:\メモ\Projects\discord_shin.md` へ参照導線を追加
+- 投票開始日の基準を月曜起点に変更（`index.js`）
+  - `getAnnouncementSaturdayMsJst` の `announcementDayMs` を「土曜-10日」から「対象週の月曜-10日」へ修正
+  - 月曜開催でも十分な準備期間を確保できるよう調整
+- 本番反映（月曜基準）
+  - `tmpfiles` 経由で `/home/ubuntu/discord-bot/index.js` を更新
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実施、`online` 確認（restart `125`）
+- メモ更新
+  - `C:\メモ\Projects\discord_shin.md` を月曜基準に合わせて更新
+- 確定ロジックを変更（`index.js`）
+  - `decideTeamEventFinalSlot` を「票数優先」へ統一
+  - 同票時は `sat/sun` を優先
+  - 同カテゴリ同票はランダム（`Math.random()`）で確定
+- 本番反映（ロジック変更）
+  - 本番転送時に接続リセットが連続し `index.js` が一時的に空ファイル化
+  - `tmpfiles` 経由で `/home/ubuntu/discord-bot/index.js` を復旧
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実施、`online` 確認（restart `124`）
+- チームイベントの投票開始リード日数を `10` 日へ変更（`index.js`）
+  - `TEAM_EVENT_LEAD_DAYS` のデフォルトを `3 -> 10`
+  - `getAnnouncementSaturdayMsJst` 内のフォールバックも `10` に統一
+- 本番反映
+  - `/home/ubuntu/discord-bot/index.js` を更新
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実行、`pm2 status` で `online` を確認（restart `123`）
 - チームイベント可用日機能を「月〜日ボタンの複数選択」方式に変更（`index.js`）
   - 可用日パネルを `◀/▶ + 時刻` から `月〜日(7日)日付ボタン` に置換
   - ボタンラベルに日別集計人数を表示
@@ -29,25 +83,61 @@
   - 本番で `node --check index.js` 成功
   - `pm2 restart discord-bot --update-env` 実行、`pm2 status` で `online` を確認（pid `567969`, restart `114`）
   - 本番 `index.js` で `maybePostTeamEventProposal` 内の `sendTeamEventAvailabilityPanel(...)` 呼び出しを確認
+- ローカルコミットを作成
+  - `3e923e7` `Switch team event availability to weekly date panel`
+  - 変更: `index.js`, `handoff.md`
+- 残タスクの実施
+  - Discord実メッセージ `1476744675355267246` を取得し、可用日パネルが「月〜日ボタン + 日別人数表示」になっていることを確認
+  - 本番 open proposal (`weekendKey=2026-04-04`) の `availabilityMessageId` が空だったため、可用日パネルを再送信して state に保存
+    - 保存後 `availabilityMessageId=1476744675355267246`
+  - 可用日集計ロジックの検証スクリプトで、複数ユーザー入力時に上位2日が選ばれることを確認
+    - 例: `2026-04-03:3`, `2026-03-31:1` が `TOP2`
+- 可用日パネルの見た目を修正（`index.js`）
+  - 日付ボタン色を候補1/2連動から切り離し、全日 `Secondary` に統一
+  - 「シフト登録（複数選択）」として誤解しにくいUIへ調整
+- ローカルコミットを追加
+  - `8d7fd68` `Unify availability day button styling`
+  - 変更: `index.js`（1 insertion, 4 deletions）
+- 本番反映（ボタン色統一）
+  - `scp` で `/home/ubuntu/discord-bot/index.js` を更新
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実行
+  - `pm2 status` で `online` を確認（pid `590808`, restart `115`）
 
 ## 現在の状態
 - ローカル `node --check index.js` は成功
 - 本番 `node --check /home/ubuntu/discord-bot/index.js` は成功
 - 本番 `discord-bot` は `online`（PM2）
-- 未コミット変更あり: `index.js`, `handoff.md`
+- 投票開始リード日数は `10日`（対象週の月曜10日前の18:00 JST以降に投稿）
+- 確定ロジックは「票数優先 / 同票は土日優先 / 同カテゴリ同票はランダム」
+- 可用日パネルに `登録人数: X人` を表示
+- 本番 open proposal
+  - `weekendKey=2026-04-04`
+  - `primary=2026-04-03 21:00`, `backup=2026-04-05 21:00`
+  - `availabilityMessageId=1476744675355267246`
+- ローカル未コミット: `.gitignore`, `index.js`, `handoff.md`
+- ローカル未追跡ファイルはクリーン（`git status` で `??` なし）
 
 ## 残りのタスク
-- [ ] Discordで可用日パネルが「月〜日ボタン+人数表示」になっていることを確認
-- [ ] 複数人で日付ボタンを押し、上位2日が候補へ反映されることを確認
-- [ ] すでに投稿済みの現行提案に可用日パネルが必要な場合は `!te panel` を実行
+- [x] Discordで可用日パネルが「月〜日ボタン+人数表示」になっていることを確認
+- [x] ローカル検証で「月曜10日前投稿判定 / 同票時土日優先+同カテゴリランダム / 上位2候補反映」を確認
+- [ ] 次回提案が「対象週の月曜10日前の18:00 JST以降」に投稿されることを実運用で確認
+- [ ] 同票時の確定結果が「土日優先 / 同カテゴリはランダム」で動くことを次回確定時に確認
+- [ ] 複数人で日付ボタンを押し、上位2日が候補へ反映されることを実運用チャンネルで確認（手動）
+- [x] すでに投稿済みの現行提案に可用日パネルが必要な場合は `!te panel` 相当を実行（メッセージ再送済み）
 
 ## 注意点
+- SSH転送が不安定な場合、反映後に `wc -l index.js` と `node --check index.js` を必ず実施する
 - WindowsのOpenSSHで known_hosts 未登録時、SSHが待機してタイムアウトすることがある。`StrictHostKeyChecking=accept-new` で一度登録してから実行すると安定
 - SSH長時間転送が切れやすく、`scp` は失敗しやすい。緊急時は一時URL経由の更新が有効
 - `pm2 logs` の error には過去の `SyntaxError` 行が残るため、現行状態は `pm2 status` の `online` と最新 `out.log` を併せて確認すること
 - 文字化け確認時は `Get-Content -Encoding UTF8` を使うこと
+- `!te panel` は「ボット以外のユーザー発言」でのみ実行可能（実装で `message.author.bot` を無視）。自動化時はAPIで直接パネル再送する必要あり
 
 ## 関連ファイル
 - `C:\Users\longs\Projects\tools\discord_shin\index.js`
+- `C:\Users\longs\Projects\tools\discord_shin\.gitignore`
 - `C:\Users\longs\Projects\tools\discord_shin\handoff.md`
+- `C:\メモ\Projects\discord_shin_OfficialFeed_NotebookLM.md`
 - `/home/ubuntu/discord-bot/index.js`
+- `/home/ubuntu/discord-bot/team_event_state.json`

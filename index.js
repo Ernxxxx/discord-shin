@@ -2431,11 +2431,16 @@ client.once(Events.ClientReady, readyClient => {
 });
 
 async function applyTeamEventAvailabilityChangeAndRefresh(readyClient, record) {
-    const { slotChanged } = recalculateTeamEventProposalSlots(record);
+    const { slotChanged, voteCountsChanged } = recalculateTeamEventProposalSlots(record);
     upsertTeamEventProposalRecord(record);
     saveTeamEventState();
-    await updateTeamEventProposalMessage(readyClient, record);
-    await updateTeamEventAvailabilityPanelMessage(readyClient, record);
+    const updateTasks = [
+        updateTeamEventAvailabilityPanelMessage(readyClient, record)
+    ];
+    if (slotChanged || voteCountsChanged) {
+        updateTasks.push(updateTeamEventProposalMessage(readyClient, record));
+    }
+    await Promise.all(updateTasks);
     return slotChanged;
 }
 

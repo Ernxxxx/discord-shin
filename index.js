@@ -2450,18 +2450,17 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         return;
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    // 日付登録系は無通知で処理する（ボタンの「loading」だけ解消）
+    await interaction.deferUpdate();
 
     if (parsed.category === 'day') {
         const validDateSet = new Set(buildTeamEventWindowDateKeys(record.weekendKey));
         if (!validDateSet.has(parsed.value)) {
-            await interaction.editReply('対象週外の日付です。');
             return;
         }
         const slotKey = getTeamEventAvailabilityDateSlotKey(parsed.value);
         const entry = ensureTeamEventAvailabilityEntry(record, userId);
-        const exists = entry.slots.includes(slotKey);
-        if (exists) {
+        if (entry.slots.includes(slotKey)) {
             entry.slots = entry.slots.filter(value => value !== slotKey);
         } else {
             entry.slots.push(slotKey);
@@ -2472,12 +2471,6 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         cleanupTeamEventAvailabilityEntry(record, userId);
 
         await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        const dayLabel = getTeamEventAvailabilityDateLabel(parsed.value);
-        await interaction.editReply(
-            exists
-                ? `可用日を解除しました: ${dayLabel}`
-                : `可用日を登録しました: ${dayLabel}`
-        );
         return;
     }
 
@@ -2489,7 +2482,6 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
             delete record.availabilityCursor[userId];
         }
         await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        await interaction.editReply('可用日を全削除しました。');
         return;
     }
 
@@ -2499,7 +2491,6 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         entry.unknown = true;
         entry.updatedAt = new Date().toISOString();
         await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        await interaction.editReply('シフト未確定として登録しました。');
         return;
     }
 
@@ -2509,11 +2500,8 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         entry.updatedAt = new Date().toISOString();
         cleanupTeamEventAvailabilityEntry(record, userId);
         await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        await interaction.editReply('シフト未確定を解除しました。');
         return;
     }
-
-    await interaction.editReply('未対応の操作です。');
 }
 
 client.on(Events.InteractionCreate, async interaction => {

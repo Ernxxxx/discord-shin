@@ -777,6 +777,97 @@ function getAnnouncementSaturdayMsJst(now = new Date()) {
     return null;
 }
 
+function buildTeamEventCycleInfo(weekendKey) {
+    if (!isValidDateKey(weekendKey)) return null;
+    const dayMs = 24 * 60 * 60 * 1000;
+    const leadDays = Number.isFinite(TEAM_EVENT_LEAD_DAYS) ? Math.max(0, TEAM_EVENT_LEAD_DAYS) : 10;
+    const postHour = Number.isFinite(TEAM_EVENT_POST_HOUR_JST)
+        ? Math.max(0, Math.min(23, TEAM_EVENT_POST_HOUR_JST))
+        : 18;
+    const weekStartKey = getTeamEventWeekStartDateKey(weekendKey);
+    const weekStartMs = Date.parse(`${weekStartKey}T00:00:00+09:00`);
+    if (Number.isNaN(weekStartMs)) return null;
+    const announcementDayMs = weekStartMs - leadDays * dayMs;
+    const announcementDayKey = getJstDateKeyFromMs(announcementDayMs);
+    const announcementPostMs = Date.parse(`${announcementDayKey}T${pad2(postHour)}:00:00+09:00`);
+    return {
+        weekendKey,
+        weekendRangeLabel: getTeamEventWindowRangeLabel(weekendKey),
+        announcementDayKey,
+        announcementPostMs: Number.isNaN(announcementPostMs) ? null : announcementPostMs
+    };
+}
+
+function getNextTeamEventWeekendKey(now = new Date()) {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const intervalMs = TEAM_EVENT_INTERVAL_DAYS * dayMs;
+    const currentDayMs = getCurrentJstMidnightMs(now);
+    const baseSaturdayMs = getTeamEventBaseSaturdayMs();
+    const approxIndex = Math.floor((currentDayMs - baseSaturdayMs) / intervalMs);
+
+    for (let offset = -1; offset <= 400; offset += 1) {
+        const weekendMs = baseSaturdayMs + (approxIndex + offset) * intervalMs;
+        if (weekendMs < currentDayMs) continue;
+        return getJstDateKeyFromMs(weekendMs);
+    }
+
+    return null;
+}
+
+function getNextTeamEventAnnouncementInfo(now = new Date()) {
+    if (!Number.isFinite(TEAM_EVENT_POST_HOUR_JST)) return null;
+
+    const dayMs = 24 * 60 * 60 * 1000;
+    const intervalMs = TEAM_EVENT_INTERVAL_DAYS * dayMs;
+    const currentDayMs = getCurrentJstMidnightMs(now);
+    const baseSaturdayMs = getTeamEventBaseSaturdayMs();
+    const approxIndex = Math.floor((currentDayMs - baseSaturdayMs) / intervalMs);
+    const nowMs = now.getTime();
+    let best = null;
+
+    for (let offset = -2; offset <= 400; offset += 1) {
+        const weekendMs = baseSaturdayMs + (approxIndex + offset) * intervalMs;
+        const weekendKey = getJstDateKeyFromMs(weekendMs);
+        const cycleInfo = buildTeamEventCycleInfo(weekendKey);
+        if (!cycleInfo || !Number.isFinite(cycleInfo.announcementPostMs)) continue;
+        if (cycleInfo.announcementPostMs < nowMs) continue;
+        if (!best || cycleInfo.announcementPostMs < best.announcementPostMs) {
+            best = cycleInfo;
+        }
+    }
+
+    return best;
+}
+
+function buildTeamEventNextScheduleText(now = new Date()) {
+    const lines = ['チームイベント次回スケジュール'];
+    const nextShiftInfo = getNextTeamEventAnnouncementInfo(now);
+    const openRecord = getLatestOpenTeamEventProposalRecord();
+
+    if (nextShiftInfo && Number.isFinite(nextShiftInfo.announcementPostMs)) {
+        lines.push(`次回シフト登録開始: ${formatDateForEmbed(new Date(nextShiftInfo.announcementPostMs))} JST`);
+        lines.push(`次回イベント週: ${nextShiftInfo.weekendRangeLabel}`);
+        lines.push(`周期キー日: ${nextShiftInfo.weekendKey}`);
+    } else {
+        lines.push('次回シフト登録開始: 計算できませんでした');
+        const nextEventWeekendKey = getNextTeamEventWeekendKey(now);
+        if (nextEventWeekendKey) {
+            lines.push(`直近イベント週: ${getTeamEventWindowRangeLabel(nextEventWeekendKey)}`);
+            lines.push(`周期キー日: ${nextEventWeekendKey}`);
+        } else {
+            lines.push('直近イベント週: 計算できませんでした');
+        }
+    }
+
+    if (openRecord) {
+        lines.push('');
+        lines.push(`現在投票中: ${openRecord.weekendRangeLabel}`);
+        lines.push(`投票締切: ${buildTeamEventVoteCloseLabel(openRecord)}`);
+    }
+
+    return lines.join('\n');
+}
+
 function hashString(input) {
     let hash = 2166136261;
     for (let i = 0; i < input.length; i += 1) {
@@ -2601,6 +2692,7 @@ client.on(Events.InteractionCreate, async interaction => {
 function buildTeamEventCommandUsageText() {
     return [
         'チームイベント可用日コマンド',
+        '`!te next` 次回シフト登録開始日とイベント週を表示',
         '`!te status` 現在の対象週と設定を表示',
         '`!te panel` 可用日ボタンパネルを再送信',
         '`!te recalc` 可用日を反映して候補を再計算',
@@ -2650,15 +2742,20 @@ async function handleTeamEventCommandMessage(message) {
 
     const args = content.split(/\s+/).slice(1);
     const sub = (args[0] || '').toLowerCase();
-    const record = getLatestOpenTeamEventProposalRecord();
-
-    if (!record) {
-        await message.reply('現在、投票中のチームイベント提案はありません。');
-        return true;
-    }
 
     if (!sub || sub === 'help') {
         await message.reply(buildTeamEventCommandUsageText());
+        return true;
+    }
+
+    if (sub === 'next' || sub === 'schedule') {
+        await message.reply(buildTeamEventNextScheduleText());
+        return true;
+    }
+
+    const record = getLatestOpenTeamEventProposalRecord();
+    if (!record) {
+        await message.reply('現在、投票中のチームイベント提案はありません。`!te next` で次回予定を確認できます。');
         return true;
     }
 
@@ -2821,7 +2918,7 @@ client.on(Events.MessageCreate, async message => {
                 { name: '🎮 ネタ系', value: '`!n` ねけます\n`!m` もう無理\n`!mo` どうせｵﾚがﾋｰﾗｰ\n`!s` 申し訳なさございません\n`!d` ディスコ上げときますねー\n`!i` いいよ。ｵﾚ要らない\n`!a` あーいーいーいー\n`!si` 最近ｵﾚにあたり強くない？', inline: true },
                 { name: '📅 スケジュール', value: '`!b` 防衛軍スケジュール', inline: true },
                 { name: '⏰ リマインダー', value: '`!remind 21:00` 時刻指定\n`!remind 1/25 21:00` 日付指定\n`!remind 2025/1/25 21:00` 年指定\n`!remind 30m` 分指定\n`!r` 一覧 `!r delete 1` 削除\n`!r clear` 全削除', inline: true },
-                { name: '🎉 イベント', value: '`!3` 3月イベント告知', inline: true }
+                { name: '🎉 イベント', value: '`!3` 3月イベント告知\n`!te next` 次回シフト登録開始/イベント週\n`!te status` 現在の対象週\n`!te avail list` 自分の可用日\n`!te help` チームイベント詳細', inline: true }
             )
             .setFooter({ text: 'Shin Bot' });
         message.reply({ embeds: [helpEmbed] });

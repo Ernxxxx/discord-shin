@@ -197,7 +197,10 @@ const TEAM_EVENT_HISTORY_MAX = Number.isFinite(TEAM_EVENT_HISTORY_MAX_RAW)
     ? Math.max(1, TEAM_EVENT_HISTORY_MAX_RAW)
     : 120;
 const TEAM_EVENT_BUTTON_PREFIX = 'team_event';
-const TEAM_EVENT_TIME_SLOTS = ['20:30', '21:00', '21:30', '22:00', '22:30'];
+const TEAM_EVENT_AVAIL_BUTTON_PREFIX = 'team_event_avail';
+const TEAM_EVENT_FIXED_TIME = '21:00';
+const TEAM_EVENT_TIME_SLOTS = [TEAM_EVENT_FIXED_TIME];
+const TEAM_EVENT_AVAILABILITY_WEEK_DAYS = 7;
 const TEAM_EVENT_SLOT_WINDOW_DAYS_RAW = parseInt(process.env.TEAM_EVENT_SLOT_WINDOW_DAYS || '7', 10);
 const TEAM_EVENT_SLOT_WINDOW_DAYS = Number.isFinite(TEAM_EVENT_SLOT_WINDOW_DAYS_RAW)
     ? Math.max(2, TEAM_EVENT_SLOT_WINDOW_DAYS_RAW)
@@ -475,7 +478,7 @@ function normalizeTeamEventAvailabilityMap(rawAvailability) {
         slotsRaw.forEach(slot => {
             const parsed = parseTeamEventSlotKey(slot);
             if (!parsed) return;
-            slotSet.add(parsed.slotKey);
+            slotSet.add(getTeamEventSlotKey(parsed.dateKey, TEAM_EVENT_FIXED_TIME));
         });
         const slots = Array.from(slotSet).sort();
         const unknown = entry.unknown === true;
@@ -517,6 +520,20 @@ function normalizeTeamEventSlotRecord(slotObj, fallbackDateKey, fallbackTime) {
     };
 }
 
+function normalizeTeamEventAvailabilityCursorMap(rawCursorMap) {
+    if (!rawCursorMap || typeof rawCursorMap !== 'object') return {};
+    const result = {};
+    for (const [userIdRaw, indexRaw] of Object.entries(rawCursorMap)) {
+        const userId = String(userIdRaw || '').trim();
+        if (!userId) continue;
+        const idx = Number(indexRaw);
+        if (!Number.isFinite(idx)) continue;
+        const safeIdx = Math.max(0, Math.floor(idx));
+        result[userId] = safeIdx;
+    }
+    return result;
+}
+
 function normalizeTeamEventProposalRecord(record, weekendKeyFallback = '') {
     const recordObj = (record && typeof record === 'object') ? record : {};
     const weekendKey = typeof recordObj.weekendKey === 'string' && recordObj.weekendKey
@@ -529,18 +546,21 @@ function normalizeTeamEventProposalRecord(record, weekendKeyFallback = '') {
     const finalized = (recordObj.finalized && typeof recordObj.finalized === 'object') ? recordObj.finalized : {};
     const reminders = (recordObj.reminders && typeof recordObj.reminders === 'object') ? recordObj.reminders : {};
     const availability = normalizeTeamEventAvailabilityMap(recordObj.availability);
-    const defaultPrimaryDate = isValidDateKey(weekendKey) ? weekendKey : getJstDateKeyFromMs(Date.now());
-    const defaultBackupDate = getJstDateKeyPlusDays(defaultPrimaryDate, 1);
+    const availabilityCursor = normalizeTeamEventAvailabilityCursorMap(recordObj.availabilityCursor);
+    const weekDateKeys = buildTeamEventWindowDateKeys(weekendKey);
+    const defaultPrimaryDate = isValidDateKey(weekDateKeys[0]) ? weekDateKeys[0] : getJstDateKeyFromMs(Date.now());
+    const defaultBackupDate = isValidDateKey(weekDateKeys[1]) ? weekDateKeys[1] : getJstDateKeyPlusDays(defaultPrimaryDate, 1);
 
     return {
         weekendKey,
         weekendRangeLabel: typeof recordObj.weekendRangeLabel === 'string' ? recordObj.weekendRangeLabel : '',
         channelId: typeof recordObj.channelId === 'string' ? recordObj.channelId : '',
         proposalMessageId: typeof recordObj.proposalMessageId === 'string' ? recordObj.proposalMessageId : '',
+        availabilityMessageId: typeof recordObj.availabilityMessageId === 'string' ? recordObj.availabilityMessageId : '',
         createdAt: typeof recordObj.createdAt === 'string' ? recordObj.createdAt : new Date().toISOString(),
         activities: Array.isArray(recordObj.activities) ? recordObj.activities.slice(0, 10) : [],
-        primary: normalizeTeamEventSlotRecord(primary, defaultPrimaryDate, '21:00'),
-        backup: normalizeTeamEventSlotRecord(backup, defaultBackupDate, '22:00'),
+        primary: normalizeTeamEventSlotRecord(primary, defaultPrimaryDate, TEAM_EVENT_FIXED_TIME),
+        backup: normalizeTeamEventSlotRecord(backup, defaultBackupDate, TEAM_EVENT_FIXED_TIME),
         attendance: {
             join: normalizeUserIdList(attendance.join),
             maybe: normalizeUserIdList(attendance.maybe),
@@ -558,7 +578,8 @@ function normalizeTeamEventProposalRecord(record, weekendKeyFallback = '') {
             d3Sent: reminders.d3Sent === true,
             h2Sent: reminders.h2Sent === true
         },
-        availability
+        availability,
+        availabilityCursor
     };
 }
 
@@ -658,63 +679,67 @@ function getTeamEventDateTimeMs(weekendKey, dayCode, timeText, dateKeyOverride =
     return Number.isNaN(eventMs) ? null : eventMs;
 }
 
+function getTeamEventWeekStartDateKey(weekendKey) {
+    if (!isValidDateKey(weekendKey)) return weekendKey;
+    const baseMs = Date.parse(`${weekendKey}T00:00:00+09:00`);
+    if (Number.isNaN(baseMs)) return weekendKey;
+    const shifted = new Date(baseMs + 9 * 60 * 60 * 1000);
+    const dayOfWeek = shifted.getUTCDay(); // 0:Sun ... 6:Sat
+    const diffToMonday = (dayOfWeek + 6) % 7;
+    return getJstDateKeyFromMs(baseMs - diffToMonday * 24 * 60 * 60 * 1000);
+}
+
 function buildTeamEventWindowDateKeys(weekendKey) {
+    const weekStart = getTeamEventWeekStartDateKey(weekendKey);
     const result = [];
-    for (let i = 0; i < TEAM_EVENT_SLOT_WINDOW_DAYS; i += 1) {
-        result.push(getJstDateKeyPlusDays(weekendKey, i));
+    for (let i = 0; i < TEAM_EVENT_AVAILABILITY_WEEK_DAYS; i += 1) {
+        result.push(getJstDateKeyPlusDays(weekStart, i));
     }
     return result;
 }
 
 function buildTeamEventCandidateSlots(weekendKey) {
-    const slots = [];
-    const dateKeys = buildTeamEventWindowDateKeys(weekendKey);
-    dateKeys.forEach(dateKey => {
+    return buildTeamEventWindowDateKeys(weekendKey).map(dateKey => {
         const dayInfo = getTeamEventDayInfoFromDateKey(dateKey);
-        TEAM_EVENT_TIME_SLOTS.forEach(time => {
-            slots.push({
-                dateKey,
-                dayCode: dayInfo.dayCode,
-                dayLabel: dayInfo.dayLabel,
-                time,
-                slotKey: getTeamEventSlotKey(dateKey, time)
-            });
-        });
+        return {
+            dateKey,
+            dayCode: dayInfo.dayCode,
+            dayLabel: dayInfo.dayLabel,
+            time: TEAM_EVENT_FIXED_TIME,
+            slotKey: getTeamEventSlotKey(dateKey, TEAM_EVENT_FIXED_TIME)
+        };
     });
-    return slots;
 }
 
 function getTeamEventWindowRangeLabel(weekendKey) {
-    const endKey = getJstDateKeyPlusDays(weekendKey, TEAM_EVENT_SLOT_WINDOW_DAYS - 1);
-    return `${weekendKey} - ${endKey} (JST)`;
+    const dateKeys = buildTeamEventWindowDateKeys(weekendKey);
+    const startKey = dateKeys[0] || weekendKey;
+    const endKey = dateKeys[dateKeys.length - 1] || weekendKey;
+    return `${startKey} - ${endKey} (JST)`;
 }
 
-function getTeamEventShiftSlotsRegistered(availability) {
-    return TEAM_EVENT_SHIFT_USER_IDS.some(userId => {
-        const entry = availability[userId];
-        return !!(entry && Array.isArray(entry.slots) && entry.slots.length > 0);
-    });
+function getTeamEventAvailableUserIdsForSlot(slotKey, availability) {
+    const users = [];
+    for (const [userId, entry] of Object.entries(availability || {})) {
+        const slots = Array.isArray(entry?.slots) ? entry.slots : [];
+        if (slots.includes(slotKey)) {
+            users.push(userId);
+        }
+    }
+    return users.sort();
 }
 
 function scoreTeamEventCandidateSlot(slot, weekendKey, availability, seed) {
-    let availableCount = 0;
-    let shiftCount = 0;
-    for (const [userId, entry] of Object.entries(availability || {})) {
-        const slots = Array.isArray(entry?.slots) ? entry.slots : [];
-        if (!slots.includes(slot.slotKey)) continue;
-        availableCount += 1;
-        if (TEAM_EVENT_SHIFT_USER_IDS.includes(userId)) {
-            shiftCount += 1;
-        }
-    }
-    const historyScore = getHistoricalSlotScore(slot.dayCode, slot.time);
+    const availableUserIds = getTeamEventAvailableUserIdsForSlot(slot.slotKey, availability);
+    const availableCount = availableUserIds.length;
+    const historyScore = getHistoricalDayScore(slot.dayCode);
     const deterministic = hashString(`${weekendKey}|${slot.slotKey}|${seed}`);
-    const score = availableCount + (shiftCount * TEAM_EVENT_SHIFT_WEIGHT) + (historyScore * 0.1);
+    const score = availableCount + (historyScore * 0.1);
     return {
         ...slot,
+        availableUserIds,
         score,
         availableCount,
-        shiftCount,
         historyScore,
         deterministic
     };
@@ -722,7 +747,6 @@ function scoreTeamEventCandidateSlot(slot, weekendKey, availability, seed) {
 
 function sortTeamEventScoredCandidates(a, b) {
     if (a.score !== b.score) return b.score - a.score;
-    if (a.shiftCount !== b.shiftCount) return b.shiftCount - a.shiftCount;
     if (a.availableCount !== b.availableCount) return b.availableCount - a.availableCount;
     if (a.historyScore !== b.historyScore) return b.historyScore - a.historyScore;
     return a.deterministic - b.deterministic;
@@ -843,28 +867,24 @@ function buildTeamEventProposal(weekendKey, availability = {}) {
     const scored = candidateSlots
         .map(slot => scoreTeamEventCandidateSlot(slot, weekendKey, availability, seed))
         .sort(sortTeamEventScoredCandidates);
-
-    const shiftRestricted = getTeamEventShiftSlotsRegistered(availability);
-    const preferredPool = shiftRestricted
-        ? scored.filter(item => item.shiftCount > 0)
-        : scored;
-    const primaryCandidate = preferredPool[0] || scored[0];
-    const backupFromPreferred = preferredPool.find(item => item.slotKey !== primaryCandidate?.slotKey) || null;
-    const backupFromAll = scored.find(item => item.slotKey !== primaryCandidate?.slotKey) || null;
-    const backupCandidate = backupFromPreferred || backupFromAll || primaryCandidate;
+    const primaryCandidate = scored[0] || null;
+    const backupCandidate = scored.find(item => item.slotKey !== primaryCandidate?.slotKey) || primaryCandidate;
 
     const activities = pickUniqueFromList(TEAM_EVENT_ACTIVITIES, 3, seed ^ 0x9e3779b9);
+    const fallbackDateKeys = buildTeamEventWindowDateKeys(weekendKey);
     const primaryInfo = primaryCandidate || {
-        dateKey: weekendKey,
-        dayCode: 'sat',
-        dayLabel: TEAM_EVENT_DAY_LABELS.sat,
-        time: '21:00'
+        dateKey: fallbackDateKeys[0] || weekendKey,
+        dayCode: getTeamEventDayInfoFromDateKey(fallbackDateKeys[0] || weekendKey).dayCode,
+        dayLabel: getTeamEventDayInfoFromDateKey(fallbackDateKeys[0] || weekendKey).dayLabel,
+        time: TEAM_EVENT_FIXED_TIME,
+        availableUserIds: []
     };
     const backupInfo = backupCandidate || {
-        dateKey: getJstDateKeyPlusDays(weekendKey, 1),
-        dayCode: 'sun',
-        dayLabel: TEAM_EVENT_DAY_LABELS.sun,
-        time: '22:00'
+        dateKey: fallbackDateKeys[1] || getJstDateKeyPlusDays(weekendKey, 1),
+        dayCode: getTeamEventDayInfoFromDateKey(fallbackDateKeys[1] || getJstDateKeyPlusDays(weekendKey, 1)).dayCode,
+        dayLabel: getTeamEventDayInfoFromDateKey(fallbackDateKeys[1] || getJstDateKeyPlusDays(weekendKey, 1)).dayLabel,
+        time: TEAM_EVENT_FIXED_TIME,
+        availableUserIds: []
     };
 
     return {
@@ -878,6 +898,8 @@ function buildTeamEventProposal(weekendKey, availability = {}) {
         backupDayCode: backupInfo.dayCode,
         backupDay: backupInfo.dayLabel,
         backupTime: backupInfo.time,
+        primaryAvailableUserIds: Array.isArray(primaryInfo.availableUserIds) ? primaryInfo.availableUserIds : [],
+        backupAvailableUserIds: Array.isArray(backupInfo.availableUserIds) ? backupInfo.availableUserIds : [],
         activities
     };
 }
@@ -901,6 +923,26 @@ function getTeamEventTallyDelayHoursSafe() {
         : 48;
 }
 
+function getTeamEventVoteCloseAtMs(record) {
+    const createdAtMs = Date.parse(record?.createdAt || '');
+    if (Number.isNaN(createdAtMs)) return null;
+    const tallyDelayMs = getTeamEventTallyDelayHoursSafe() * 60 * 60 * 1000;
+    return createdAtMs + tallyDelayMs;
+}
+
+function buildTeamEventVoteCloseLabel(record) {
+    const closeAtMs = getTeamEventVoteCloseAtMs(record);
+    if (closeAtMs === null) {
+        return `${getTeamEventTallyDelayHoursSafe()}時間後`;
+    }
+    return `${formatDateForEmbed(new Date(closeAtMs))} JST`;
+}
+
+function buildTeamEventShiftPromptText(record) {
+    const closeLabel = buildTeamEventVoteCloseLabel(record);
+    return `対象週の月〜日で行ける日を複数選択してください（開催時刻は ${TEAM_EVENT_FIXED_TIME} 固定）。投票締切: ${closeLabel}`;
+}
+
 function buildTeamEventSlotLabelWithDate(record, slotRecord) {
     const dateKey = isValidDateKey(slotRecord?.dateKey)
         ? slotRecord.dateKey
@@ -912,8 +954,8 @@ function buildTeamEventSlotLabelWithDate(record, slotRecord) {
 
 function buildTeamEventTimeVoteText(record) {
     return [
-        `第1候補: ${buildTeamEventSlotLabelWithDate(record, record.primary)} (${record.primary.votes.length}票)`,
-        `第2候補: ${buildTeamEventSlotLabelWithDate(record, record.backup)} (${record.backup.votes.length}票)`
+        `第1候補: ${buildTeamEventSlotLabelWithDate(record, record.primary)} (${record.primary.votes.length}人)`,
+        `第2候補: ${buildTeamEventSlotLabelWithDate(record, record.backup)} (${record.backup.votes.length}人)`
     ].join('\n');
 }
 
@@ -926,12 +968,12 @@ function buildTeamEventAttendanceVoteText(record) {
 }
 
 function buildTeamEventProposalPlainText(record) {
-    const tallyDelayHours = getTeamEventTallyDelayHoursSafe();
+    const voteCloseLabel = buildTeamEventVoteCloseLabel(record);
     const lines = [
         '【チームイベント提案（隔週）】',
         `対象週: ${record.weekendRangeLabel}`,
         '',
-        '集合時間案',
+        '候補日（可用日集計）',
         buildTeamEventTimeVoteText(record),
         '',
         '出欠（自動集計）',
@@ -945,24 +987,24 @@ function buildTeamEventProposalPlainText(record) {
     if (record.finalized.slot && record.finalized.eventLabel) {
         lines.push(`確定済み: ${record.finalized.eventLabel}`);
     } else {
-        lines.push(`投票受付中: ${tallyDelayHours}時間後に自動確定`);
+        lines.push(`投票受付中: ${voteCloseLabel} まで（自動確定）`);
     }
 
     return lines.join('\n');
 }
 
 function buildTeamEventProposalEmbed(record) {
-    const tallyDelayHours = getTeamEventTallyDelayHoursSafe();
+    const voteCloseLabel = buildTeamEventVoteCloseLabel(record);
     const statusText = record.finalized.slot && record.finalized.eventLabel
         ? `確定済み: ${record.finalized.eventLabel}`
-        : `投票受付中: ${tallyDelayHours}時間後に自動確定`;
+        : `投票受付中: ${voteCloseLabel} まで（自動確定）`;
 
     return new EmbedBuilder()
         .setColor(record.finalized.slot ? 0x2ECC71 : 0xF39C12)
         .setTitle('チームイベント提案（隔週）')
         .setDescription(`対象週: ${record.weekendRangeLabel}`)
         .addFields(
-            { name: '集合時間案', value: buildTeamEventTimeVoteText(record) },
+            { name: '候補日（可用日集計）', value: buildTeamEventTimeVoteText(record) },
             { name: '出欠（自動集計）', value: buildTeamEventAttendanceVoteText(record) },
             { name: 'やること案', value: buildTeamEventActivitiesText(record) },
             { name: '状態', value: statusText }
@@ -975,18 +1017,6 @@ function buildTeamEventButtonCustomId(weekendKey, category, value) {
 
 function buildTeamEventProposalComponents(record) {
     const disabled = !!record.finalized.slot;
-    const slotRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'slot', 'primary'))
-            .setLabel(`第1候補 ${record.primary.votes.length}`)
-            .setStyle(ButtonStyle.Primary)
-            .setDisabled(disabled),
-        new ButtonBuilder()
-            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'slot', 'backup'))
-            .setLabel(`第2候補 ${record.backup.votes.length}`)
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(disabled)
-    );
     const attendanceRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
             .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'attendance', 'join'))
@@ -1004,7 +1034,7 @@ function buildTeamEventProposalComponents(record) {
             .setStyle(ButtonStyle.Danger)
             .setDisabled(disabled)
     );
-    return [slotRow, attendanceRow];
+    return [attendanceRow];
 }
 
 function createTeamEventProposalRecord(channelId, proposal) {
@@ -1013,6 +1043,7 @@ function createTeamEventProposalRecord(channelId, proposal) {
         weekendRangeLabel: proposal.weekendRangeLabel,
         channelId,
         proposalMessageId: '',
+        availabilityMessageId: '',
         createdAt: new Date().toISOString(),
         activities: Array.isArray(proposal.activities) ? proposal.activities.slice(0, 10) : [],
         primary: {
@@ -1026,7 +1057,7 @@ function createTeamEventProposalRecord(channelId, proposal) {
             dateKey: proposal.backupDateKey || getJstDateKeyPlusDays(proposal.weekendKey, 1),
             dayCode: TEAM_EVENT_DAY_CODES.includes(proposal.backupDayCode) ? proposal.backupDayCode : 'sun',
             dayLabel: proposal.backupDay || TEAM_EVENT_DAY_LABELS.sun,
-            time: proposal.backupTime || '22:00',
+            time: proposal.backupTime || TEAM_EVENT_FIXED_TIME,
             votes: []
         },
         attendance: {
@@ -1046,7 +1077,8 @@ function createTeamEventProposalRecord(channelId, proposal) {
             d3Sent: false,
             h2Sent: false
         },
-        availability: {}
+        availability: {},
+        availabilityCursor: {}
     }, proposal.weekendKey);
 }
 
@@ -1075,22 +1107,6 @@ function assignTeamEventVoteSingleChoice(record, category, value, userId) {
     };
 
     if (category === 'slot') {
-        const wasPrimary = record.primary.votes.includes(userId);
-        const wasBackup = record.backup.votes.includes(userId);
-        removeUser(record.primary.votes);
-        removeUser(record.backup.votes);
-        if ((value === 'primary' && wasPrimary) || (value === 'backup' && wasBackup)) {
-            // Pressing the same button again cancels selection in this category.
-            return true;
-        }
-        if (value === 'backup') {
-            addUser(record.backup.votes);
-            return true;
-        }
-        if (value === 'primary') {
-            addUser(record.primary.votes);
-            return true;
-        }
         return false;
     }
 
@@ -1134,8 +1150,8 @@ function decideTeamEventFinalSlot(record) {
         return primaryVotes > backupVotes ? 'primary' : 'backup';
     }
 
-    const primaryHistory = getHistoricalSlotScore(record.primary.dayCode, record.primary.time);
-    const backupHistory = getHistoricalSlotScore(record.backup.dayCode, record.backup.time);
+    const primaryHistory = getHistoricalDayScore(record.primary.dayCode);
+    const backupHistory = getHistoricalDayScore(record.backup.dayCode);
     if (primaryHistory !== backupHistory) {
         return primaryHistory >= backupHistory ? 'primary' : 'backup';
     }
@@ -1149,8 +1165,8 @@ function getTeamEventSlotRecord(record, slot) {
 
 function buildTeamEventSlotVoteSummary(record) {
     return [
-        `第1候補 ${buildTeamEventSlotLabelWithDate(record, record.primary)}: ${record.primary.votes.length}票`,
-        `第2候補 ${buildTeamEventSlotLabelWithDate(record, record.backup)}: ${record.backup.votes.length}票`
+        `第1候補 ${buildTeamEventSlotLabelWithDate(record, record.primary)}: ${record.primary.votes.length}人`,
+        `第2候補 ${buildTeamEventSlotLabelWithDate(record, record.backup)}: ${record.backup.votes.length}人`
     ].join('\n');
 }
 
@@ -1216,6 +1232,8 @@ function recalculateTeamEventProposalSlots(record) {
     const proposal = buildTeamEventProposal(record.weekendKey, record.availability || {});
     const prevPrimaryKey = getTeamEventSlotKeyFromRecordSlot(record, record.primary);
     const prevBackupKey = getTeamEventSlotKeyFromRecordSlot(record, record.backup);
+    const prevPrimaryVotes = JSON.stringify(normalizeUserIdList(record.primary.votes));
+    const prevBackupVotes = JSON.stringify(normalizeUserIdList(record.backup.votes));
     const nextPrimaryKey = getTeamEventSlotKey(proposal.primaryDateKey, proposal.primaryTime);
     const nextBackupKey = getTeamEventSlotKey(proposal.backupDateKey, proposal.backupTime);
     const slotChanged = prevPrimaryKey !== nextPrimaryKey || prevBackupKey !== nextBackupKey;
@@ -1225,24 +1243,208 @@ function recalculateTeamEventProposalSlots(record) {
     record.primary.dayCode = proposal.primaryDayCode;
     record.primary.dayLabel = proposal.primaryDay;
     record.primary.time = proposal.primaryTime;
+    record.primary.votes = Array.isArray(proposal.primaryAvailableUserIds)
+        ? proposal.primaryAvailableUserIds.slice()
+        : [];
     record.backup.dateKey = proposal.backupDateKey;
     record.backup.dayCode = proposal.backupDayCode;
     record.backup.dayLabel = proposal.backupDay;
     record.backup.time = proposal.backupTime;
+    record.backup.votes = Array.isArray(proposal.backupAvailableUserIds)
+        ? proposal.backupAvailableUserIds.slice()
+        : [];
     if (Array.isArray(proposal.activities) && proposal.activities.length > 0) {
         record.activities = proposal.activities.slice(0, 10);
     }
-
-    if (slotChanged) {
-        record.primary.votes = [];
-        record.backup.votes = [];
-    }
+    const nextPrimaryVotes = JSON.stringify(normalizeUserIdList(record.primary.votes));
+    const nextBackupVotes = JSON.stringify(normalizeUserIdList(record.backup.votes));
+    const voteCountsChanged = prevPrimaryVotes !== nextPrimaryVotes || prevBackupVotes !== nextBackupVotes;
 
     return {
         slotChanged,
+        voteCountsChanged,
         primarySlotKey: nextPrimaryKey,
         backupSlotKey: nextBackupKey
     };
+}
+
+function buildTeamEventAvailabilityButtonCustomId(weekendKey, category, value) {
+    return `${TEAM_EVENT_AVAIL_BUTTON_PREFIX}|${weekendKey}|${category}|${value}`;
+}
+
+function parseTeamEventAvailabilityButtonCustomId(customId) {
+    const parts = String(customId || '').split('|');
+    if (parts.length !== 4) return null;
+    if (parts[0] !== TEAM_EVENT_AVAIL_BUTTON_PREFIX) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(parts[1])) return null;
+    const category = parts[2];
+    const value = parts[3];
+    if (category === 'day') {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    } else if (category === 'cmd') {
+        if (!['list', 'clear', 'unknown', 'known'].includes(value)) return null;
+    } else {
+        return null;
+    }
+    return {
+        weekendKey: parts[1],
+        category,
+        value
+    };
+}
+
+function getTeamEventAvailabilityDateCounts(record) {
+    const dateKeys = buildTeamEventWindowDateKeys(record.weekendKey);
+    const counts = {};
+    dateKeys.forEach(dateKey => {
+        counts[dateKey] = 0;
+    });
+    const validDateSet = new Set(dateKeys);
+
+    for (const entry of Object.values(record.availability || {})) {
+        const slots = Array.isArray(entry?.slots) ? entry.slots : [];
+        const dateSet = new Set();
+        slots.forEach(slotKey => {
+            const parsed = parseTeamEventSlotKey(slotKey);
+            if (!parsed) return;
+            if (validDateSet.has(parsed.dateKey)) {
+                dateSet.add(parsed.dateKey);
+            }
+        });
+        dateSet.forEach(dateKey => {
+            counts[dateKey] += 1;
+        });
+    }
+
+    return counts;
+}
+
+function getTeamEventAvailabilityDateLabel(dateKey) {
+    const info = getTeamEventDayInfoFromDateKey(dateKey);
+    const [yyyy, mm, dd] = dateKey.split('-');
+    const shortDay = info.dayLabel.replace('曜', '');
+    return `${mm}/${dd}(${shortDay})`;
+}
+
+function buildTeamEventAvailabilityDateButtonLabel(dateKey, count) {
+    return `${getTeamEventAvailabilityDateLabel(dateKey)} ${count}`;
+}
+
+function getTeamEventAvailabilityDateSlotKey(dateKey) {
+    return getTeamEventSlotKey(dateKey, TEAM_EVENT_FIXED_TIME);
+}
+
+function buildTeamEventAvailabilityPanelPlainText(record) {
+    const dateCounts = getTeamEventAvailabilityDateCounts(record);
+    const dateLines = buildTeamEventWindowDateKeys(record.weekendKey)
+        .map(dateKey => `${getTeamEventAvailabilityDateLabel(dateKey)}: ${dateCounts[dateKey] || 0}人`);
+    return [
+        '【可用日登録パネル】',
+        `対象週: ${record.weekendRangeLabel}`,
+        `投票締切: ${buildTeamEventVoteCloseLabel(record)}`,
+        `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`,
+        '',
+        buildTeamEventShiftPromptText(record),
+        '',
+        '日別集計:',
+        ...dateLines,
+        '',
+        '使い方:',
+        '1) 月〜日のボタンを押して行ける日を複数選択',
+        '2) 同じ日付をもう一度押すと解除',
+        '3) 「登録一覧」で自分の登録を確認',
+        '4) 「未確定/確定」ボタンでシフト状態を切替'
+    ].join('\n');
+}
+
+function buildTeamEventAvailabilityPanelEmbed(record) {
+    const dateCounts = getTeamEventAvailabilityDateCounts(record);
+    const dateSummary = buildTeamEventWindowDateKeys(record.weekendKey)
+        .map(dateKey => `${getTeamEventAvailabilityDateLabel(dateKey)}: ${dateCounts[dateKey] || 0}人`)
+        .join('\n');
+    return new EmbedBuilder()
+        .setColor(0x3498DB)
+        .setTitle('可用日登録パネル')
+        .setDescription([
+            `対象週: ${record.weekendRangeLabel}`,
+            `投票締切: ${buildTeamEventVoteCloseLabel(record)}`,
+            `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`,
+            '',
+            '日別集計:',
+            dateSummary,
+            '',
+            '月〜日のボタンを押して行ける日を複数選択できます。'
+        ].join('\n'));
+}
+
+function buildTeamEventAvailabilityPanelComponents(record) {
+    const disabled = !!record.finalized.slot;
+    const dateCounts = getTeamEventAvailabilityDateCounts(record);
+    const dateRows = [];
+    const dateKeys = buildTeamEventWindowDateKeys(record.weekendKey);
+    for (let i = 0; i < dateKeys.length; i += 5) {
+        const row = new ActionRowBuilder();
+        dateKeys.slice(i, i + 5).forEach(dateKey => {
+            const style = dateKey === record.primary.dateKey
+                ? ButtonStyle.Primary
+                : (dateKey === record.backup.dateKey ? ButtonStyle.Success : ButtonStyle.Secondary);
+            row.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'day', dateKey))
+                    .setLabel(buildTeamEventAvailabilityDateButtonLabel(dateKey, dateCounts[dateKey] || 0))
+                    .setStyle(style)
+                    .setDisabled(disabled)
+            );
+        });
+        dateRows.push(row);
+    }
+
+    const commandRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'list'))
+            .setLabel('登録一覧')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(disabled),
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'clear'))
+            .setLabel('全削除')
+            .setStyle(ButtonStyle.Danger)
+            .setDisabled(disabled),
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'unknown'))
+            .setLabel('未確定')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(disabled),
+        new ButtonBuilder()
+            .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'known'))
+            .setLabel('確定')
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(disabled)
+    );
+
+    return [...dateRows, commandRow];
+}
+
+function buildTeamEventAvailabilityListForUser(record, userId) {
+    const entry = record.availability?.[userId];
+    const slots = Array.isArray(entry?.slots) ? entry.slots : [];
+    const unknown = entry?.unknown === true;
+    const lines = [];
+    lines.push(`対象週: ${record.weekendRangeLabel}`);
+    if (slots.length === 0) {
+        lines.push('登録日時: なし');
+    } else {
+        const uniqueDates = Array.from(new Set(
+            slots
+                .map(slot => parseTeamEventSlotKey(slot))
+                .filter(parsed => parsed && isValidDateKey(parsed.dateKey))
+                .map(parsed => parsed.dateKey)
+        )).sort();
+        lines.push(`登録日 (${TEAM_EVENT_FIXED_TIME} 固定):`);
+        uniqueDates.forEach((dateKey, idx) => lines.push(`${idx + 1}. ${getTeamEventAvailabilityDateLabel(dateKey)} (${dateKey})`));
+    }
+    lines.push(`シフト: ${unknown ? '未確定' : '確定/通常'}`);
+    return lines.join('\n');
 }
 
 function hasSeenOfficialKey(source, key) {
@@ -1655,6 +1857,41 @@ function buildTeamEventProposalEditPayload(channel, record) {
     };
 }
 
+async function sendTeamEventAvailabilityPanel(channel, record) {
+    const components = buildTeamEventAvailabilityPanelComponents(record);
+    const promptText = buildTeamEventShiftPromptText(record);
+    if (!canChannelEmbedLinks(channel)) {
+        return channel.send({
+            content: buildTeamEventAvailabilityPanelPlainText(record),
+            components
+        });
+    }
+
+    return channel.send({
+        content: promptText,
+        embeds: [buildTeamEventAvailabilityPanelEmbed(record)],
+        components
+    });
+}
+
+function buildTeamEventAvailabilityPanelEditPayload(channel, record) {
+    const components = buildTeamEventAvailabilityPanelComponents(record);
+    const promptText = buildTeamEventShiftPromptText(record);
+    if (!canChannelEmbedLinks(channel)) {
+        return {
+            content: buildTeamEventAvailabilityPanelPlainText(record),
+            embeds: [],
+            components
+        };
+    }
+
+    return {
+        content: promptText,
+        embeds: [buildTeamEventAvailabilityPanelEmbed(record)],
+        components
+    };
+}
+
 async function resolveTeamEventChannelById(readyClient, channelId) {
     if (!channelId) return null;
     try {
@@ -1682,6 +1919,20 @@ async function updateTeamEventProposalMessage(readyClient, record) {
     }
 }
 
+async function updateTeamEventAvailabilityPanelMessage(readyClient, record) {
+    if (!record.channelId || !record.availabilityMessageId) return;
+    const channel = await resolveTeamEventChannelById(readyClient, record.channelId);
+    if (!channel || !channel.messages || typeof channel.messages.fetch !== 'function') return;
+
+    try {
+        const message = await channel.messages.fetch(record.availabilityMessageId);
+        if (!message) return;
+        await message.edit(buildTeamEventAvailabilityPanelEditPayload(channel, record));
+    } catch (e) {
+        console.error(`Failed to update team event availability panel: ${record.weekendKey}`, e.message);
+    }
+}
+
 async function sendTeamEventFinalizedSummary(channel, record) {
     const slotRecord = getTeamEventSlotRecord(record, record.finalized.slot);
     const finalizedLabel = record.finalized.eventLabel || `${slotRecord.dayLabel} ${slotRecord.time} (JST)`;
@@ -1695,7 +1946,7 @@ async function sendTeamEventFinalizedSummary(channel, record) {
             `対象週: ${record.weekendRangeLabel}`,
             `確定日時: ${finalizedLabel}`,
             '',
-            '候補投票結果',
+            '可用日集計結果',
             voteSummary,
             '',
             '出欠（自動集計）',
@@ -1713,7 +1964,7 @@ async function sendTeamEventFinalizedSummary(channel, record) {
         .setDescription(`対象週: ${record.weekendRangeLabel}`)
         .addFields(
             { name: '確定日時', value: finalizedLabel },
-            { name: '候補投票結果', value: voteSummary },
+            { name: '可用日集計結果', value: voteSummary },
             { name: '出欠（自動集計）', value: attendanceSummary },
             { name: 'やること案', value: activitiesText }
         );
@@ -1809,6 +2060,7 @@ async function finalizeTeamEventProposal(readyClient, record, nowMs) {
     }
 
     await updateTeamEventProposalMessage(readyClient, record);
+    await updateTeamEventAvailabilityPanelMessage(readyClient, record);
     upsertTeamEventProposalRecord(record);
     return true;
 }
@@ -1888,6 +2140,13 @@ async function runTeamEventMaintenance(readyClient) {
 
         for (const record of proposalEntries) {
             if (!record.finalized.slot) {
+                const { slotChanged, voteCountsChanged } = recalculateTeamEventProposalSlots(record);
+                if (slotChanged || voteCountsChanged) {
+                    upsertTeamEventProposalRecord(record);
+                    stateChanged = true;
+                    await updateTeamEventProposalMessage(readyClient, record);
+                    await updateTeamEventAvailabilityPanelMessage(readyClient, record);
+                }
                 const createdAtMs = Date.parse(record.createdAt);
                 if (!Number.isNaN(createdAtMs) && nowMs >= createdAtMs + tallyDelayMs) {
                     const finalized = await finalizeTeamEventProposal(readyClient, record, nowMs);
@@ -1942,6 +2201,14 @@ async function maybePostTeamEventProposal(readyClient) {
         const record = createTeamEventProposalRecord(teamEventTargetChannel.id, proposal);
         const message = await sendTeamEventProposal(teamEventTargetChannel, record);
         record.proposalMessageId = message.id;
+        try {
+            const availabilityMessage = await sendTeamEventAvailabilityPanel(teamEventTargetChannel, record);
+            if (availabilityMessage && availabilityMessage.id) {
+                record.availabilityMessageId = availabilityMessage.id;
+            }
+        } catch (e) {
+            console.error(`Failed to send team event availability panel: ${weekendKey}`, e.message);
+        }
         upsertTeamEventProposalRecord(record);
         markTeamEventPosted(weekendKey);
         saveTeamEventState();
@@ -2166,53 +2433,174 @@ client.once(Events.ClientReady, readyClient => {
     }, TEAM_EVENT_CHECK_INTERVAL_MS);
 });
 
+async function applyTeamEventAvailabilityChangeAndRefresh(readyClient, record) {
+    const { slotChanged } = recalculateTeamEventProposalSlots(record);
+    upsertTeamEventProposalRecord(record);
+    saveTeamEventState();
+    await updateTeamEventProposalMessage(readyClient, record);
+    await updateTeamEventAvailabilityPanelMessage(readyClient, record);
+    return slotChanged;
+}
+
+async function handleTeamEventAvailabilityButtonInteraction(interaction, record, parsed) {
+    const userId = interaction.user.id;
+
+    if (parsed.category === 'cmd' && parsed.value === 'list') {
+        await interaction.reply({
+            content: buildTeamEventAvailabilityListForUser(record, userId),
+            ephemeral: true
+        });
+        return;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    if (parsed.category === 'day') {
+        const validDateSet = new Set(buildTeamEventWindowDateKeys(record.weekendKey));
+        if (!validDateSet.has(parsed.value)) {
+            await interaction.editReply('対象週外の日付です。');
+            return;
+        }
+        const slotKey = getTeamEventAvailabilityDateSlotKey(parsed.value);
+        const entry = ensureTeamEventAvailabilityEntry(record, userId);
+        const exists = entry.slots.includes(slotKey);
+        if (exists) {
+            entry.slots = entry.slots.filter(value => value !== slotKey);
+        } else {
+            entry.slots.push(slotKey);
+            entry.slots.sort();
+        }
+        entry.unknown = false;
+        entry.updatedAt = new Date().toISOString();
+        cleanupTeamEventAvailabilityEntry(record, userId);
+
+        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        const suffix = slotChanged ? '\n候補日を再計算しました。' : '';
+        const dayLabel = getTeamEventAvailabilityDateLabel(parsed.value);
+        await interaction.editReply(
+            exists
+                ? `可用日を解除しました: ${dayLabel}${suffix}`
+                : `可用日を登録しました: ${dayLabel}${suffix}`
+        );
+        return;
+    }
+
+    if (parsed.category === 'cmd' && parsed.value === 'clear') {
+        if (record.availability && typeof record.availability === 'object') {
+            delete record.availability[userId];
+        }
+        if (record.availabilityCursor && typeof record.availabilityCursor === 'object') {
+            delete record.availabilityCursor[userId];
+        }
+        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        await interaction.editReply(
+            slotChanged
+                ? '可用日を全削除し、候補日を再計算しました。'
+                : '可用日を全削除しました。'
+        );
+        return;
+    }
+
+    if (parsed.category === 'cmd' && parsed.value === 'unknown') {
+        const entry = ensureTeamEventAvailabilityEntry(record, userId);
+        entry.slots = [];
+        entry.unknown = true;
+        entry.updatedAt = new Date().toISOString();
+        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        await interaction.editReply(
+            slotChanged
+                ? 'シフト未確定として登録し、候補日を再計算しました。'
+                : 'シフト未確定として登録しました。'
+        );
+        return;
+    }
+
+    if (parsed.category === 'cmd' && parsed.value === 'known') {
+        const entry = ensureTeamEventAvailabilityEntry(record, userId);
+        entry.unknown = false;
+        entry.updatedAt = new Date().toISOString();
+        cleanupTeamEventAvailabilityEntry(record, userId);
+        const slotChanged = await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
+        await interaction.editReply(
+            slotChanged
+                ? 'シフト未確定を解除し、候補日を再計算しました。'
+                : 'シフト未確定を解除しました。'
+        );
+        return;
+    }
+
+    await interaction.editReply('未対応の操作です。');
+}
+
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isButton()) return;
 
     try {
-        const parsed = parseTeamEventButtonCustomId(interaction.customId);
-        if (!parsed) return;
+        const voteParsed = parseTeamEventButtonCustomId(interaction.customId);
+        const availParsed = parseTeamEventAvailabilityButtonCustomId(interaction.customId);
+        if (!voteParsed && !availParsed) return;
 
+        const parsed = voteParsed || availParsed;
         const record = getTeamEventProposalRecord(parsed.weekendKey);
         if (!record) {
-            await interaction.reply({ content: 'この投票は期限切れです。', ephemeral: true });
-            return;
-        }
-
-        if (record.proposalMessageId && interaction.message?.id !== record.proposalMessageId) {
-            await interaction.reply({ content: '別メッセージの投票です。', ephemeral: true });
-            return;
-        }
-
-        if (record.finalized.slot) {
-            await interaction.reply({ content: 'この提案はすでに確定済みです。', ephemeral: true });
+            await interaction.reply({ content: 'proposal not found', ephemeral: true });
             return;
         }
 
         const channel = interaction.channel;
         if (!channel || !channel.isTextBased()) {
-            await interaction.reply({ content: '投票先チャンネルを取得できませんでした。', ephemeral: true });
+            await interaction.reply({ content: 'failed to resolve channel', ephemeral: true });
             return;
         }
 
-        const updated = assignTeamEventVoteSingleChoice(record, parsed.category, parsed.value, interaction.user.id);
-        if (!updated) {
-            await interaction.reply({ content: '投票内容の解析に失敗しました。', ephemeral: true });
+        if (voteParsed) {
+            if (record.proposalMessageId && interaction.message?.id !== record.proposalMessageId) {
+                await interaction.reply({ content: 'invalid vote button', ephemeral: true });
+                return;
+            }
+
+            if (voteParsed.category === 'slot') {
+                await interaction.reply({ content: '候補日の手動投票は無効です。可用日パネルを使ってください。', ephemeral: true });
+                return;
+            }
+
+            if (record.finalized.slot) {
+                await interaction.reply({ content: 'already finalized', ephemeral: true });
+                return;
+            }
+
+            const updated = assignTeamEventVoteSingleChoice(record, voteParsed.category, voteParsed.value, interaction.user.id);
+            if (!updated) {
+                await interaction.reply({ content: 'failed to update vote', ephemeral: true });
+                return;
+            }
+
+            await interaction.deferUpdate();
+            upsertTeamEventProposalRecord(record);
+            saveTeamEventState();
+            if (interaction.message && typeof interaction.message.edit === 'function') {
+                await interaction.message.edit(buildTeamEventProposalEditPayload(channel, record));
+            }
             return;
         }
 
-        await interaction.deferUpdate();
-        upsertTeamEventProposalRecord(record);
-        saveTeamEventState();
-        if (interaction.message && typeof interaction.message.edit === 'function') {
-            await interaction.message.edit(buildTeamEventProposalEditPayload(channel, record));
+        if (record.availabilityMessageId && interaction.message?.id !== record.availabilityMessageId) {
+            await interaction.reply({ content: 'invalid availability button', ephemeral: true });
+            return;
         }
+
+        if (record.finalized.slot) {
+            await interaction.reply({ content: 'already finalized', ephemeral: true });
+            return;
+        }
+
+        await handleTeamEventAvailabilityButtonInteraction(interaction, record, availParsed);
     } catch (e) {
         console.error('Team event interaction failed:', e.message);
         if (!interaction.replied && !interaction.deferred) {
-            await interaction.reply({ content: '投票更新に失敗しました。もう一度押してください。', ephemeral: true });
+            await interaction.reply({ content: 'failed to apply interaction', ephemeral: true });
         } else if (interaction.deferred) {
-            await interaction.followUp({ content: '投票更新に失敗しました。もう一度押してください。', ephemeral: true });
+            await interaction.followUp({ content: 'failed to apply interaction', ephemeral: true });
         }
     }
 });
@@ -2221,14 +2609,15 @@ function buildTeamEventCommandUsageText() {
     return [
         'チームイベント可用日コマンド',
         '`!te status` 現在の対象週と設定を表示',
+        '`!te panel` 可用日ボタンパネルを再送信',
         '`!te recalc` 可用日を反映して候補を再計算',
         '`!te avail list` 自分の登録状況を表示',
-        '`!te avail add YYYY-MM-DD HH:MM` 可用日時を追加',
-        '`!te avail remove YYYY-MM-DD HH:MM` 可用日時を削除',
-        '`!te avail clear` 可用日時を全削除',
+        '`!te avail add YYYY-MM-DD` 可用日を追加',
+        '`!te avail remove YYYY-MM-DD` 可用日を削除',
+        '`!te avail clear` 可用日を全削除',
         '`!te avail unknown` シフト未確定として登録',
         '`!te avail known` シフト未確定フラグを解除',
-        `対象時刻: ${TEAM_EVENT_TIME_SLOTS.join(', ')}`
+        `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`
     ].join('\n');
 }
 
@@ -2238,13 +2627,19 @@ function buildTeamEventAvailabilityListText(record, userId) {
     const unknown = entry?.unknown === true;
     const lines = [];
     lines.push(`対象週: ${record.weekendRangeLabel}`);
-    lines.push(`候補時間帯: ${TEAM_EVENT_TIME_SLOTS.join(', ')}`);
+    lines.push(`開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`);
     if (slots.length === 0) {
-        lines.push('登録日時: なし');
+        lines.push('登録日: なし');
     } else {
-        lines.push('登録日時:');
-        slots.forEach((slot, idx) => {
-            lines.push(`${idx + 1}. ${slot}`);
+        const uniqueDates = Array.from(new Set(
+            slots
+                .map(slot => parseTeamEventSlotKey(slot))
+                .filter(parsed => parsed && isValidDateKey(parsed.dateKey))
+                .map(parsed => parsed.dateKey)
+        )).sort();
+        lines.push('登録日:');
+        uniqueDates.forEach((dateKey, idx) => {
+            lines.push(`${idx + 1}. ${getTeamEventAvailabilityDateLabel(dateKey)} (${dateKey})`);
         });
     }
     if (unknown) {
@@ -2279,16 +2674,24 @@ async function handleTeamEventCommandMessage(message) {
     }
 
     if (sub === 'status') {
-        const shiftUsers = TEAM_EVENT_SHIFT_USER_IDS.length > 0
-            ? TEAM_EVENT_SHIFT_USER_IDS.map(id => `<@${id}>`).join(', ')
-            : '未設定';
         await message.reply([
             `対象週: ${record.weekendRangeLabel}`,
+            `投票締切: ${buildTeamEventVoteCloseLabel(record)}`,
+            `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`,
             `候補1: ${buildTeamEventSlotLabelWithDate(record, record.primary)}`,
-            `候補2: ${buildTeamEventSlotLabelWithDate(record, record.backup)}`,
-            `シフト対象: ${shiftUsers}`,
-            `シフト重み: ${TEAM_EVENT_SHIFT_WEIGHT}`
+            `候補2: ${buildTeamEventSlotLabelWithDate(record, record.backup)}`
         ].join('\n'));
+        return true;
+    }
+
+    if (sub === 'panel') {
+        const panelMessage = await sendTeamEventAvailabilityPanel(message.channel, record);
+        if (panelMessage && panelMessage.id) {
+            record.availabilityMessageId = panelMessage.id;
+            upsertTeamEventProposalRecord(record);
+            saveTeamEventState();
+        }
+        await message.reply(`可用日パネルを再送信しました: ${panelMessage?.id || '(no id)'}`);
         return true;
     }
 
@@ -2297,8 +2700,9 @@ async function handleTeamEventCommandMessage(message) {
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
+        await updateTeamEventAvailabilityPanelMessage(message.client, record);
         await message.reply(slotChanged
-            ? '可用日を反映して候補を再計算しました。候補投票はリセットしました。'
+            ? '可用日を反映して候補日を再計算しました。'
             : '可用日を反映して候補を再計算しました。候補は変更なしです。');
         return true;
     }
@@ -2324,9 +2728,10 @@ async function handleTeamEventCommandMessage(message) {
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
+        await updateTeamEventAvailabilityPanelMessage(message.client, record);
         await message.reply(slotChanged
-            ? '可用日時を削除し、候補を再計算しました。候補投票はリセットしました。'
-            : '可用日時を削除しました。');
+            ? '可用日を削除し、候補日を再計算しました。'
+            : '可用日を削除しました。');
         return true;
     }
 
@@ -2339,6 +2744,7 @@ async function handleTeamEventCommandMessage(message) {
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
+        await updateTeamEventAvailabilityPanelMessage(message.client, record);
         await message.reply(slotChanged
             ? 'シフト未確定として登録しました。候補を再計算しました。'
             : 'シフト未確定として登録しました。');
@@ -2354,6 +2760,7 @@ async function handleTeamEventCommandMessage(message) {
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
+        await updateTeamEventAvailabilityPanelMessage(message.client, record);
         await message.reply(slotChanged
             ? 'シフト未確定フラグを解除し、候補を再計算しました。'
             : 'シフト未確定フラグを解除しました。');
@@ -2367,15 +2774,19 @@ async function handleTeamEventCommandMessage(message) {
 
     const dateText = args[2] || '';
     const timeText = args[3] || '';
-    const parsedSlot = parseTeamEventSlotKey(`${dateText} ${timeText}`);
-    if (!parsedSlot) {
-        await message.reply('日時形式が不正です。例: `!te avail add 2026-03-10 21:00`');
+    if (!isValidDateKey(dateText)) {
+        await message.reply('日付形式が不正です。例: `!te avail add 2026-03-10`');
         return true;
     }
-    if (!TEAM_EVENT_TIME_SLOTS.includes(parsedSlot.time)) {
-        await message.reply(`時間は次から選んでください: ${TEAM_EVENT_TIME_SLOTS.join(', ')}`);
+    if (timeText && normalizeTimeText(timeText, '') !== TEAM_EVENT_FIXED_TIME) {
+        await message.reply(`開催時刻は ${TEAM_EVENT_FIXED_TIME} 固定です。`);
         return true;
     }
+    const parsedSlot = {
+        dateKey: dateText,
+        time: TEAM_EVENT_FIXED_TIME,
+        slotKey: getTeamEventAvailabilityDateSlotKey(dateText)
+    };
 
     const validSlotKeys = buildTeamEventCandidateSlotKeySet(record.weekendKey);
     if (!validSlotKeys.has(parsedSlot.slotKey)) {
@@ -2403,19 +2814,20 @@ async function handleTeamEventCommandMessage(message) {
     upsertTeamEventProposalRecord(record);
     saveTeamEventState();
     await updateTeamEventProposalMessage(message.client, record);
+    await updateTeamEventAvailabilityPanelMessage(message.client, record);
 
     if (action === 'add' && afterCount === beforeCount) {
-        await message.reply(`可用日時は既に登録済みです: ${parsedSlot.slotKey}`);
+        await message.reply(`可用日は既に登録済みです: ${parsedSlot.dateKey}`);
         return true;
     }
     if (action === 'remove' && beforeCount === afterCount) {
-        await message.reply(`未登録の日時です: ${parsedSlot.slotKey}`);
+        await message.reply(`未登録の可用日です: ${parsedSlot.dateKey}`);
         return true;
     }
 
     await message.reply(slotChanged
-        ? `可用日時を更新しました: ${parsedSlot.slotKey}\n候補を再計算したため候補投票はリセットしました。`
-        : `可用日時を更新しました: ${parsedSlot.slotKey}`);
+        ? `可用日を更新しました: ${parsedSlot.dateKey}\n候補日を再計算しました。`
+        : `可用日を更新しました: ${parsedSlot.dateKey}`);
     return true;
 }
 

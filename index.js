@@ -2581,9 +2581,12 @@ client.on(Events.InteractionCreate, async interaction => {
             return;
         }
 
-        if (record.availabilityMessageId && interaction.message?.id !== record.availabilityMessageId) {
-            await interaction.reply({ content: 'invalid availability button', ephemeral: true });
-            return;
+        // 可用日パネルは再送や復旧で messageId がずれることがあるため、
+        // 押されたパネルを正として availabilityMessageId を自動同期する。
+        if (interaction.message?.id && record.availabilityMessageId !== interaction.message.id) {
+            record.availabilityMessageId = interaction.message.id;
+            upsertTeamEventProposalRecord(record);
+            saveTeamEventState();
         }
 
         if (record.finalized.slot) {
@@ -2634,14 +2637,13 @@ function buildTeamEventAvailabilityListText(record, userId) {
                 .filter(parsed => parsed && isValidDateKey(parsed.dateKey))
                 .map(parsed => parsed.dateKey)
         )).sort();
-        lines.push('登録日:');
+        lines.push(`登録日 (${uniqueDates.length}件):`);
         uniqueDates.forEach((dateKey, idx) => {
             lines.push(`${idx + 1}. ${getTeamEventAvailabilityDateLabel(dateKey)} (${dateKey})`);
         });
     }
-    if (unknown) {
-        lines.push('シフト: 未確定');
-    }
+    lines.push(`シフト: ${unknown ? '未確定' : '確定/通常'}`);
+    lines.push('操作: 日付ボタンは再押下で解除できます。');
     return lines.join('\n');
 }
 

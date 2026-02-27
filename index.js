@@ -1282,7 +1282,7 @@ function parseTeamEventAvailabilityButtonCustomId(customId) {
     if (category === 'day') {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
     } else if (category === 'cmd') {
-        if (!['list', 'all', 'clear', 'unknown', 'known'].includes(value)) return null;
+        if (!['list', 'all', 'clear'].includes(value)) return null;
     } else {
         return null;
     }
@@ -1353,7 +1353,8 @@ function buildTeamEventAvailabilityPanelPlainText(record) {
         '1) 月〜日のボタンを押して行ける日を複数選択',
         '2) 同じ日付をもう一度押すと解除',
         '3) 「登録一覧」で自分の登録を確認',
-        '4) 「未確定/確定」ボタンでシフト状態を切替'
+        '4) 「全部出席」で全日を一括登録',
+        '5) 「全削除」で登録をリセット'
     ].join('\n');
 }
 
@@ -1411,16 +1412,6 @@ function buildTeamEventAvailabilityPanelComponents(record) {
             .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'clear'))
             .setLabel('全削除')
             .setStyle(ButtonStyle.Danger)
-            .setDisabled(disabled),
-        new ButtonBuilder()
-            .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'unknown'))
-            .setLabel('未確定')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(disabled),
-        new ButtonBuilder()
-            .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'cmd', 'known'))
-            .setLabel('確定')
-            .setStyle(ButtonStyle.Success)
             .setDisabled(disabled)
     );
 
@@ -1430,7 +1421,6 @@ function buildTeamEventAvailabilityPanelComponents(record) {
 function buildTeamEventAvailabilityListForUser(record, userId) {
     const entry = record.availability?.[userId];
     const slots = Array.isArray(entry?.slots) ? entry.slots : [];
-    const unknown = entry?.unknown === true;
     const lines = [];
     lines.push(`対象週: ${record.weekendRangeLabel}`);
     if (slots.length === 0) {
@@ -1445,7 +1435,6 @@ function buildTeamEventAvailabilityListForUser(record, userId) {
         lines.push(`登録日 (${TEAM_EVENT_FIXED_TIME} 固定):`);
         uniqueDates.forEach((dateKey, idx) => lines.push(`${idx + 1}. ${getTeamEventAvailabilityDateLabel(dateKey)} (${dateKey})`));
     }
-    lines.push(`シフト: ${unknown ? '未確定' : '確定/通常'}`);
     return lines.join('\n');
 }
 
@@ -2476,7 +2465,6 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
             entry.slots.push(slotKey);
             entry.slots.sort();
         }
-        entry.unknown = false;
         entry.updatedAt = new Date().toISOString();
         cleanupTeamEventAvailabilityEntry(record, userId);
 
@@ -2499,26 +2487,7 @@ async function handleTeamEventAvailabilityButtonInteraction(interaction, record,
         const entry = ensureTeamEventAvailabilityEntry(record, userId);
         entry.slots = buildTeamEventWindowDateKeys(record.weekendKey)
             .map(dateKey => getTeamEventAvailabilityDateSlotKey(dateKey));
-        entry.unknown = false;
         entry.updatedAt = new Date().toISOString();
-        await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        return;
-    }
-
-    if (parsed.category === 'cmd' && parsed.value === 'unknown') {
-        const entry = ensureTeamEventAvailabilityEntry(record, userId);
-        entry.slots = [];
-        entry.unknown = true;
-        entry.updatedAt = new Date().toISOString();
-        await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
-        return;
-    }
-
-    if (parsed.category === 'cmd' && parsed.value === 'known') {
-        const entry = ensureTeamEventAvailabilityEntry(record, userId);
-        entry.unknown = false;
-        entry.updatedAt = new Date().toISOString();
-        cleanupTeamEventAvailabilityEntry(record, userId);
         await applyTeamEventAvailabilityChangeAndRefresh(interaction.client, record);
         return;
     }
@@ -2607,11 +2576,10 @@ function buildTeamEventCommandUsageText() {
         '`!te panel` 可用日ボタンパネルを再送信',
         '`!te recalc` 可用日を反映して候補を再計算',
         '`!te avail list` 自分の登録状況を表示',
+        '`!te avail all` 対象週を全日登録',
         '`!te avail add YYYY-MM-DD` 可用日を追加',
         '`!te avail remove YYYY-MM-DD` 可用日を削除',
         '`!te avail clear` 可用日を全削除',
-        '`!te avail unknown` シフト未確定として登録',
-        '`!te avail known` シフト未確定フラグを解除',
         `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`
     ].join('\n');
 }
@@ -2619,7 +2587,6 @@ function buildTeamEventCommandUsageText() {
 function buildTeamEventAvailabilityListText(record, userId) {
     const entry = record.availability?.[userId];
     const slots = Array.isArray(entry?.slots) ? entry.slots : [];
-    const unknown = entry?.unknown === true;
     const lines = [];
     lines.push(`対象週: ${record.weekendRangeLabel}`);
     lines.push(`開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`);
@@ -2637,7 +2604,6 @@ function buildTeamEventAvailabilityListText(record, userId) {
             lines.push(`${idx + 1}. ${getTeamEventAvailabilityDateLabel(dateKey)} (${dateKey})`);
         });
     }
-    lines.push(`シフト: ${unknown ? '未確定' : '確定/通常'}`);
     lines.push('操作: 日付ボタンは再押下で解除できます。');
     return lines.join('\n');
 }
@@ -2727,31 +2693,17 @@ async function handleTeamEventCommandMessage(message) {
         return true;
     }
 
-    if (action === 'unknown') {
+    if (action === 'all') {
         const entry = ensureTeamEventAvailabilityEntry(record, userId);
-        entry.slots = [];
-        entry.unknown = true;
+        entry.slots = buildTeamEventWindowDateKeys(record.weekendKey)
+            .map(dateKey => getTeamEventAvailabilityDateSlotKey(dateKey));
         entry.updatedAt = new Date().toISOString();
         recalculateTeamEventProposalSlots(record);
         upsertTeamEventProposalRecord(record);
         saveTeamEventState();
         await updateTeamEventProposalMessage(message.client, record);
         await updateTeamEventAvailabilityPanelMessage(message.client, record);
-        await message.reply('シフト未確定として登録しました。');
-        return true;
-    }
-
-    if (action === 'known') {
-        const entry = ensureTeamEventAvailabilityEntry(record, userId);
-        entry.unknown = false;
-        entry.updatedAt = new Date().toISOString();
-        cleanupTeamEventAvailabilityEntry(record, userId);
-        recalculateTeamEventProposalSlots(record);
-        upsertTeamEventProposalRecord(record);
-        saveTeamEventState();
-        await updateTeamEventProposalMessage(message.client, record);
-        await updateTeamEventAvailabilityPanelMessage(message.client, record);
-        await message.reply('シフト未確定フラグを解除しました。');
+        await message.reply('可用日を全日登録しました。');
         return true;
     }
 
@@ -2789,7 +2741,6 @@ async function handleTeamEventCommandMessage(message) {
             entry.slots.push(parsedSlot.slotKey);
             entry.slots.sort();
         }
-        entry.unknown = false;
     } else {
         entry.slots = entry.slots.filter(slot => slot !== parsedSlot.slotKey);
     }

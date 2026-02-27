@@ -1385,14 +1385,11 @@ function buildTeamEventAvailabilityPanelComponents(record) {
     for (let i = 0; i < dateKeys.length; i += 5) {
         const row = new ActionRowBuilder();
         dateKeys.slice(i, i + 5).forEach(dateKey => {
-            const style = dateKey === record.primary.dateKey
-                ? ButtonStyle.Primary
-                : (dateKey === record.backup.dateKey ? ButtonStyle.Success : ButtonStyle.Secondary);
             row.addComponents(
                 new ButtonBuilder()
                     .setCustomId(buildTeamEventAvailabilityButtonCustomId(record.weekendKey, 'day', dateKey))
                     .setLabel(buildTeamEventAvailabilityDateButtonLabel(dateKey, dateCounts[dateKey] || 0))
-                    .setStyle(style)
+                    .setStyle(ButtonStyle.Secondary)
                     .setDisabled(disabled)
             );
         });

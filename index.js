@@ -567,7 +567,7 @@ function normalizeTeamEventProposalRecord(record, weekendKeyFallback = '') {
             absent: normalizeUserIdList(attendance.absent)
         },
         finalized: {
-            slot: finalized.slot === 'backup' ? 'backup' : (finalized.slot === 'primary' ? 'primary' : null),
+            slot: typeof finalized.slot === 'string' && finalized.slot ? finalized.slot : null,
             eventDateKey: typeof finalized.eventDateKey === 'string' ? finalized.eventDateKey : null,
             eventLabel: typeof finalized.eventLabel === 'string' ? finalized.eventLabel : null,
             eventAt: typeof finalized.eventAt === 'string' ? finalized.eventAt : null,
@@ -732,15 +732,11 @@ function getTeamEventAvailableUserIdsForSlot(slotKey, availability) {
 function scoreTeamEventCandidateSlot(slot, weekendKey, availability, seed) {
     const availableUserIds = getTeamEventAvailableUserIdsForSlot(slot.slotKey, availability);
     const availableCount = availableUserIds.length;
-    const historyScore = getHistoricalDayScore(slot.dayCode);
     const deterministic = hashString(`${weekendKey}|${slot.slotKey}|${seed}`);
-    const score = availableCount + (historyScore * 0.1);
     return {
         ...slot,
         availableUserIds,
-        score,
         availableCount,
-        historyScore,
         deterministic
     };
 }
@@ -752,6 +748,13 @@ function sortTeamEventScoredCandidates(a, b) {
     const bIsWeekend = weekendDayCodes.has(b.dayCode);
     if (aIsWeekend !== bIsWeekend) return aIsWeekend ? -1 : 1;
     return a.deterministic - b.deterministic;
+}
+
+function buildTeamEventRankedSlotsFromAvailability(weekendKey, availability = {}) {
+    const seed = hashString(`team-event-${weekendKey}`);
+    return buildTeamEventCandidateSlots(weekendKey)
+        .map(slot => scoreTeamEventCandidateSlot(slot, weekendKey, availability, seed))
+        .sort(sortTeamEventScoredCandidates);
 }
 
 function getAnnouncementSaturdayMsJst(now = new Date()) {
@@ -950,109 +953,9 @@ function pickUniqueFromList(list, count, seed) {
     return picked;
 }
 
-function getHistoricalSlotScore(dayCode, timeText) {
-    const list = Array.isArray(teamEventState.participationHistory)
-        ? teamEventState.participationHistory
-        : [];
-    const filtered = list.filter(entry => (
-        entry &&
-        entry.dayCode === dayCode &&
-        entry.time === timeText &&
-        (
-            typeof entry.availabilityCount === 'number' ||
-            typeof entry.attendanceScore === 'number'
-        )
-    ));
-    if (filtered.length === 0) return 0;
-    const total = filtered.reduce(
-        (acc, entry) => acc + (
-            typeof entry.availabilityCount === 'number'
-                ? entry.availabilityCount
-                : entry.attendanceScore
-        ),
-        0
-    );
-    return total / filtered.length;
-}
-
-function getHistoricalDayScore(dayCode) {
-    const list = Array.isArray(teamEventState.participationHistory)
-        ? teamEventState.participationHistory
-        : [];
-    const filtered = list.filter(entry => (
-        entry &&
-        entry.dayCode === dayCode &&
-        (
-            typeof entry.availabilityCount === 'number' ||
-            typeof entry.attendanceScore === 'number'
-        )
-    ));
-    if (filtered.length === 0) return 0;
-    const total = filtered.reduce(
-        (acc, entry) => acc + (
-            typeof entry.availabilityCount === 'number'
-                ? entry.availabilityCount
-                : entry.attendanceScore
-        ),
-        0
-    );
-    return total / filtered.length;
-}
-
-function pickBestTimeForDay(dayCode, seed) {
-    let bestTime = null;
-    let bestScore = -1;
-    let bestCount = -1;
-
-    TEAM_EVENT_TIME_SLOTS.forEach(slot => {
-        const list = Array.isArray(teamEventState.participationHistory)
-            ? teamEventState.participationHistory
-            : [];
-        const filtered = list.filter(entry => (
-            entry &&
-            entry.dayCode === dayCode &&
-            entry.time === slot &&
-            (
-                typeof entry.availabilityCount === 'number' ||
-                typeof entry.attendanceScore === 'number'
-            )
-        ));
-        const count = filtered.length;
-        const score = count === 0
-            ? 0
-            : filtered.reduce(
-                (acc, entry) => acc + (
-                    typeof entry.availabilityCount === 'number'
-                        ? entry.availabilityCount
-                        : entry.attendanceScore
-                ),
-                0
-            ) / count;
-
-        if (
-            score > bestScore ||
-            (score === bestScore && count > bestCount) ||
-            (score === bestScore && count === bestCount && bestTime === null)
-        ) {
-            bestScore = score;
-            bestCount = count;
-            bestTime = slot;
-        }
-    });
-
-    if (bestScore > 0 && bestTime) {
-        return bestTime;
-    }
-
-    return TEAM_EVENT_TIME_SLOTS[seed % TEAM_EVENT_TIME_SLOTS.length];
-}
-
 function buildTeamEventProposal(weekendKey, availability = {}) {
     const seed = hashString(`team-event-${weekendKey}`);
-    const candidateSlots = buildTeamEventCandidateSlots(weekendKey);
-    const scored = candidateSlots
-        .map(slot => scoreTeamEventCandidateSlot(slot, weekendKey, availability, seed))
-        .sort(sortTeamEventScoredCandidates);
+    const scored = buildTeamEventRankedSlotsFromAvailability(weekendKey, availability);
     const primaryCandidate = scored[0] || null;
     const backupCandidate = scored.find(item => item.slotKey !== primaryCandidate?.slotKey) || primaryCandidate;
 
@@ -1126,54 +1029,27 @@ function buildTeamEventVoteCloseLabel(record) {
 
 function buildTeamEventShiftPromptText(record) {
     const closeLabel = buildTeamEventVoteCloseLabel(record);
-    return `対象週の月〜日で行ける日を複数選択してください（開催時刻は ${TEAM_EVENT_FIXED_TIME} 固定）。投票締切: ${closeLabel}`;
-}
-
-function buildTeamEventSlotLabelWithDate(record, slotRecord) {
-    const dateKey = isValidDateKey(slotRecord?.dateKey)
-        ? slotRecord.dateKey
-        : (slotRecord.dayCode === 'sun'
-            ? getJstDateKeyPlusDays(record.weekendKey, 1)
-            : record.weekendKey);
-    return `${dateKey} ${slotRecord.dayLabel} ${slotRecord.time}`;
-}
-
-function buildTeamEventTimeVoteText(record) {
-    return [
-        `第1候補: ${buildTeamEventSlotLabelWithDate(record, record.primary)} (${record.primary.votes.length}人)`,
-        `第2候補: ${buildTeamEventSlotLabelWithDate(record, record.backup)} (${record.backup.votes.length}人)`
-    ].join('\n');
-}
-
-function buildTeamEventAttendanceVoteText(record) {
-    return [
-        `参加: ${record.attendance.join.length}人`,
-        `未定: ${record.attendance.maybe.length}人`,
-        `不参加: ${record.attendance.absent.length}人`
-    ].join('\n');
+    return `対象週の月〜日で行ける日を複数選択してください（開催時刻は ${TEAM_EVENT_FIXED_TIME} 固定）。締切時に最多票日をそのまま確定します。投票締切: ${closeLabel}`;
 }
 
 function buildTeamEventProposalPlainText(record) {
     const voteCloseLabel = buildTeamEventVoteCloseLabel(record);
     const lines = [
-        '【チームイベント提案（隔週）】',
+        '【チームイベント旧メッセージ】',
         `対象週: ${record.weekendRangeLabel}`,
         '',
-        '候補日（可用日集計）',
-        buildTeamEventTimeVoteText(record),
+        'この形式の提案メッセージは廃止済みです。可用日登録パネルを使ってください。',
         '',
-        '出欠（自動集計）',
-        buildTeamEventAttendanceVoteText(record),
+        '日別集計',
+        buildTeamEventAvailabilityDateSummaryText(record),
         '',
-        'やること案',
-        buildTeamEventActivitiesText(record),
-        ''
+        buildTeamEventLeadingStatusText(record)
     ];
 
     if (record.finalized.slot && record.finalized.eventLabel) {
         lines.push(`確定済み: ${record.finalized.eventLabel}`);
     } else {
-        lines.push(`投票受付中: ${voteCloseLabel} まで（自動確定）`);
+        lines.push(`投票締切: ${voteCloseLabel}`);
     }
 
     return lines.join('\n');
@@ -1183,44 +1059,22 @@ function buildTeamEventProposalEmbed(record) {
     const voteCloseLabel = buildTeamEventVoteCloseLabel(record);
     const statusText = record.finalized.slot && record.finalized.eventLabel
         ? `確定済み: ${record.finalized.eventLabel}`
-        : `投票受付中: ${voteCloseLabel} まで（自動確定）`;
+        : `投票締切: ${voteCloseLabel}`;
 
     return new EmbedBuilder()
         .setColor(record.finalized.slot ? 0x2ECC71 : 0xF39C12)
-        .setTitle('チームイベント提案（隔週）')
+        .setTitle('チームイベント旧メッセージ')
         .setDescription(`対象週: ${record.weekendRangeLabel}`)
         .addFields(
-            { name: '候補日（可用日集計）', value: buildTeamEventTimeVoteText(record) },
-            { name: '出欠（自動集計）', value: buildTeamEventAttendanceVoteText(record) },
-            { name: 'やること案', value: buildTeamEventActivitiesText(record) },
+            { name: '案内', value: 'この形式の提案メッセージは廃止済みです。可用日登録パネルを使ってください。' },
+            { name: '日別集計', value: buildTeamEventAvailabilityDateSummaryText(record) },
+            { name: '最多状況', value: buildTeamEventLeadingStatusText(record) },
             { name: '状態', value: statusText }
         );
 }
 
-function buildTeamEventButtonCustomId(weekendKey, category, value) {
-    return `${TEAM_EVENT_BUTTON_PREFIX}|${weekendKey}|${category}|${value}`;
-}
-
 function buildTeamEventProposalComponents(record) {
-    const disabled = !!record.finalized.slot;
-    const attendanceRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'attendance', 'join'))
-            .setLabel(`参加 ${record.attendance.join.length}`)
-            .setStyle(ButtonStyle.Success)
-            .setDisabled(disabled),
-        new ButtonBuilder()
-            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'attendance', 'maybe'))
-            .setLabel(`未定 ${record.attendance.maybe.length}`)
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(disabled),
-        new ButtonBuilder()
-            .setCustomId(buildTeamEventButtonCustomId(record.weekendKey, 'attendance', 'absent'))
-            .setLabel(`不参加 ${record.attendance.absent.length}`)
-            .setStyle(ButtonStyle.Danger)
-            .setDisabled(disabled)
-    );
-    return [attendanceRow];
+    return [];
 }
 
 function createTeamEventProposalRecord(channelId, proposal) {
@@ -1327,34 +1181,6 @@ function assignTeamEventVoteSingleChoice(record, category, value, userId) {
     }
 
     return false;
-}
-
-function decideTeamEventFinalSlot(record) {
-    const primaryVotes = record.primary.votes.length;
-    const backupVotes = record.backup.votes.length;
-    if (primaryVotes !== backupVotes) {
-        return primaryVotes > backupVotes ? 'primary' : 'backup';
-    }
-
-    const weekendDayCodes = new Set(['sat', 'sun']);
-    const primaryIsWeekend = weekendDayCodes.has(record.primary.dayCode);
-    const backupIsWeekend = weekendDayCodes.has(record.backup.dayCode);
-    if (primaryIsWeekend !== backupIsWeekend) {
-        return primaryIsWeekend ? 'primary' : 'backup';
-    }
-
-    return Math.random() < 0.5 ? 'primary' : 'backup';
-}
-
-function getTeamEventSlotRecord(record, slot) {
-    return slot === 'backup' ? record.backup : record.primary;
-}
-
-function buildTeamEventSlotVoteSummary(record) {
-    return [
-        `第1候補 ${buildTeamEventSlotLabelWithDate(record, record.primary)}: ${record.primary.votes.length}人`,
-        `第2候補 ${buildTeamEventSlotLabelWithDate(record, record.backup)}: ${record.backup.votes.length}人`
-    ].join('\n');
 }
 
 function getTeamEventAttendanceScore(record) {
@@ -1539,11 +1365,73 @@ function getTeamEventAvailabilityDateSlotKey(dateKey) {
     return getTeamEventSlotKey(dateKey, TEAM_EVENT_FIXED_TIME);
 }
 
-function buildTeamEventAvailabilityPanelPlainText(record) {
+function buildTeamEventAvailabilityDateSummaryLines(record) {
     const dateCounts = getTeamEventAvailabilityDateCounts(record);
-    const registeredCount = getTeamEventAvailabilityRegisteredUserCount(record);
-    const dateLines = buildTeamEventWindowDateKeys(record.weekendKey)
+    return buildTeamEventWindowDateKeys(record.weekendKey)
         .map(dateKey => `${getTeamEventAvailabilityDateLabel(dateKey)}: ${dateCounts[dateKey] || 0}人`);
+}
+
+function buildTeamEventAvailabilityDateSummaryText(record) {
+    return buildTeamEventAvailabilityDateSummaryLines(record).join('\n');
+}
+
+function getTeamEventRankedSlots(record) {
+    return buildTeamEventRankedSlotsFromAvailability(record.weekendKey, record.availability || {});
+}
+
+function getTopTeamEventSlots(record) {
+    const ranked = getTeamEventRankedSlots(record);
+    const topCount = ranked[0]?.availableCount;
+    if (!Number.isFinite(topCount)) return [];
+    return ranked.filter(slot => slot.availableCount === topCount);
+}
+
+function buildTeamEventLeadingStatusText(record) {
+    const topSlots = getTopTeamEventSlots(record);
+    if (topSlots.length === 0) {
+        return '現時点最多: なし';
+    }
+
+    const topCount = topSlots[0].availableCount;
+    const labels = topSlots
+        .map(slot => `${slot.dateKey} ${slot.dayLabel} ${slot.time}`)
+        .join(' / ');
+    const weekendDayCodes = new Set(['sat', 'sun']);
+    const hasWeekend = topSlots.some(slot => weekendDayCodes.has(slot.dayCode));
+    const hasWeekday = topSlots.some(slot => !weekendDayCodes.has(slot.dayCode));
+    const ruleText = topSlots.length === 1
+        ? '締切時はこの日で確定'
+        : (
+            hasWeekend && hasWeekday
+                ? '同数上位に土日を含むため、締切時は土日から確定'
+                : '同カテゴリ同数のため、締切時はこの中からランダム確定'
+        );
+
+    return [
+        `現時点最多: ${topCount}人`,
+        `対象日: ${labels}`,
+        ruleText
+    ].join('\n');
+}
+
+function pickFinalTeamEventSlot(record) {
+    let topSlots = getTopTeamEventSlots(record);
+    if (topSlots.length === 0) return null;
+
+    const weekendDayCodes = new Set(['sat', 'sun']);
+    const hasWeekend = topSlots.some(slot => weekendDayCodes.has(slot.dayCode));
+    const hasWeekday = topSlots.some(slot => !weekendDayCodes.has(slot.dayCode));
+    if (hasWeekend && hasWeekday) {
+        topSlots = topSlots.filter(slot => weekendDayCodes.has(slot.dayCode));
+    }
+
+    const index = Math.floor(Math.random() * topSlots.length);
+    return topSlots[index] || topSlots[0] || null;
+}
+
+function buildTeamEventAvailabilityPanelPlainText(record) {
+    const registeredCount = getTeamEventAvailabilityRegisteredUserCount(record);
+    const dateLines = buildTeamEventAvailabilityDateSummaryLines(record);
     return [
         '【可用日登録パネル】',
         `対象週: ${record.weekendRangeLabel}`,
@@ -1556,6 +1444,8 @@ function buildTeamEventAvailabilityPanelPlainText(record) {
         '日別集計:',
         ...dateLines,
         '',
+        buildTeamEventLeadingStatusText(record),
+        '',
         '使い方:',
         '1) 月〜日のボタンを押して行ける日を複数選択',
         '2) 同じ日付をもう一度押すと解除',
@@ -1566,11 +1456,8 @@ function buildTeamEventAvailabilityPanelPlainText(record) {
 }
 
 function buildTeamEventAvailabilityPanelEmbed(record) {
-    const dateCounts = getTeamEventAvailabilityDateCounts(record);
     const registeredCount = getTeamEventAvailabilityRegisteredUserCount(record);
-    const dateSummary = buildTeamEventWindowDateKeys(record.weekendKey)
-        .map(dateKey => `${getTeamEventAvailabilityDateLabel(dateKey)}: ${dateCounts[dateKey] || 0}人`)
-        .join('\n');
+    const dateSummary = buildTeamEventAvailabilityDateSummaryText(record);
     return new EmbedBuilder()
         .setColor(0x3498DB)
         .setTitle('可用日登録パネル')
@@ -1582,6 +1469,8 @@ function buildTeamEventAvailabilityPanelEmbed(record) {
             '',
             '日別集計:',
             dateSummary,
+            '',
+            buildTeamEventLeadingStatusText(record),
             '',
             '月〜日のボタンを押して行ける日を複数選択できます。'
         ].join('\n'));
@@ -2157,9 +2046,8 @@ async function updateTeamEventAvailabilityPanelMessage(readyClient, record) {
 }
 
 async function sendTeamEventFinalizedSummary(channel, record) {
-    const slotRecord = getTeamEventSlotRecord(record, record.finalized.slot);
-    const finalizedLabel = record.finalized.eventLabel || `${slotRecord.dayLabel} ${slotRecord.time} (JST)`;
-    const voteSummary = buildTeamEventSlotVoteSummary(record);
+    const finalizedLabel = record.finalized.eventLabel || '日時確定済み';
+    const voteSummary = buildTeamEventAvailabilityDateSummaryText(record);
     const activitiesText = buildTeamEventActivitiesText(record);
 
     if (!canChannelEmbedLinks(channel)) {
@@ -2168,7 +2056,7 @@ async function sendTeamEventFinalizedSummary(channel, record) {
             `対象週: ${record.weekendRangeLabel}`,
             `確定日時: ${finalizedLabel}`,
             '',
-            '可用日集計結果',
+            '日別集計結果',
             voteSummary,
             '',
             'やること案',
@@ -2183,7 +2071,7 @@ async function sendTeamEventFinalizedSummary(channel, record) {
         .setDescription(`対象週: ${record.weekendRangeLabel}`)
         .addFields(
             { name: '確定日時', value: finalizedLabel },
-            { name: '可用日集計結果', value: voteSummary },
+            { name: '日別集計結果', value: voteSummary },
             { name: 'やること案', value: activitiesText }
         );
 
@@ -2229,8 +2117,8 @@ async function sendTeamEventReminder(channel, record, reminderType) {
 async function finalizeTeamEventProposal(readyClient, record, nowMs) {
     if (record.finalized.slot) return false;
 
-    const finalSlot = decideTeamEventFinalSlot(record);
-    const finalSlotRecord = getTeamEventSlotRecord(record, finalSlot);
+    const finalSlotRecord = pickFinalTeamEventSlot(record);
+    if (!finalSlotRecord) return false;
     const eventDateKey = isValidDateKey(finalSlotRecord?.dateKey)
         ? finalSlotRecord.dateKey
         : (finalSlotRecord.dayCode === 'sun'
@@ -2243,7 +2131,7 @@ async function finalizeTeamEventProposal(readyClient, record, nowMs) {
         eventDateKey
     );
 
-    record.finalized.slot = finalSlot;
+    record.finalized.slot = finalSlotRecord.slotKey;
     record.finalized.eventDateKey = eventDateKey;
     record.finalized.eventLabel = `${eventDateKey} ${finalSlotRecord.dayLabel} ${finalSlotRecord.time} (JST)`;
     record.finalized.eventAt = eventAtMs ? new Date(eventAtMs).toISOString() : null;
@@ -2254,7 +2142,7 @@ async function finalizeTeamEventProposal(readyClient, record, nowMs) {
         decidedAt: record.finalized.decidedAt,
         dayCode: finalSlotRecord.dayCode,
         time: finalSlotRecord.time,
-        availabilityCount: finalSlotRecord.votes.length,
+        availabilityCount: finalSlotRecord.availableCount,
         attendanceScore: getTeamEventAttendanceScore(record),
         joinCount: record.attendance.join.length,
         maybeCount: record.attendance.maybe.length,
@@ -2746,7 +2634,7 @@ client.on(Events.InteractionCreate, async interaction => {
             }
 
             if (voteParsed.category === 'slot') {
-                await interaction.reply({ content: '候補日の手動投票は無効です。可用日パネルを使ってください。', ephemeral: true });
+                await interaction.reply({ content: '旧日程投票ボタンは廃止しました。可用日パネルだけ使ってください。', ephemeral: true });
                 return;
             }
 
@@ -2806,7 +2694,7 @@ function buildTeamEventCommandUsageText() {
         '`!te history [件数]` 過去イベント履歴を表示（最大20件）',
         '`!te status` 現在の対象週と設定を表示',
         '`!te panel` 可用日ボタンパネルを再送信',
-        '`!te recalc` 可用日を反映して候補を再計算',
+        '`!te recalc` 可用日を反映して集計を再計算',
         '`!te avail list` 自分の登録状況を表示',
         '`!te avail all` 対象週を全日登録',
         '`!te avail add YYYY-MM-DD` 可用日を追加',
@@ -2880,8 +2768,7 @@ async function handleTeamEventCommandMessage(message) {
             `対象週: ${record.weekendRangeLabel}`,
             `投票締切: ${buildTeamEventVoteCloseLabel(record)}`,
             `開催時刻: ${TEAM_EVENT_FIXED_TIME} 固定`,
-            `候補1: ${buildTeamEventSlotLabelWithDate(record, record.primary)}`,
-            `候補2: ${buildTeamEventSlotLabelWithDate(record, record.backup)}`
+            buildTeamEventLeadingStatusText(record)
         ].join('\n'));
         return true;
     }
@@ -2904,8 +2791,8 @@ async function handleTeamEventCommandMessage(message) {
         await updateTeamEventProposalMessage(message.client, record);
         await updateTeamEventAvailabilityPanelMessage(message.client, record);
         await message.reply(slotChanged
-            ? '可用日を反映して候補日を再計算しました。'
-            : '可用日を反映して候補を再計算しました。候補は変更なしです。');
+            ? '可用日を反映して集計を再計算しました。最多票日の表示が更新されました。'
+            : '可用日を反映して集計を再計算しました。表示上の変更はありません。');
         return true;
     }
 

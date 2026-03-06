@@ -751,8 +751,6 @@ function sortTeamEventScoredCandidates(a, b) {
     const aIsWeekend = weekendDayCodes.has(a.dayCode);
     const bIsWeekend = weekendDayCodes.has(b.dayCode);
     if (aIsWeekend !== bIsWeekend) return aIsWeekend ? -1 : 1;
-    if (a.score !== b.score) return b.score - a.score;
-    if (a.historyScore !== b.historyScore) return b.historyScore - a.historyScore;
     return a.deterministic - b.deterministic;
 }
 

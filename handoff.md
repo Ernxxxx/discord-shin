@@ -1,8 +1,25 @@
 ﻿# Handoff - discord_shin
 
-更新: 2026-03-06 18:48:21
+更新: 2026-03-06 19:09:08
 
 ## 今回やったこと
+- シフト制を「候補方式」から「締切時に最多票日を直接確定」へ変更（`index.js`）
+  - 日別集計の最多日をそのまま確定するよう修正
+  - 同票に土日と平日が混ざる場合だけ土日優先、同カテゴリ同票はランダム確定
+  - 旧 `history/score` ベースの候補前提ロジックを整理
+- 旧提案メッセージを互換用の「旧メッセージ」表示へ変更（`index.js`）
+  - 旧文面から候補/出欠の案内を除去
+  - 旧提案メッセージのボタンを外し、可用日登録パネルへ誘導する表示に変更
+- ローカル検証
+  - `node --check index.js` 成功
+  - `候補` / `第1候補` / `第2候補` 文言が `index.js` に残っていないことを確認
+- GitHub 反映
+  - `2172f08` `fix: finalize shifts directly from top votes` を `origin/main` へ push
+- 本番反映
+  - `/home/ubuntu/discord-bot` で `HEAD=2172f08` を確認
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実施（restart `145` / `online`）
+  - 本番 open proposal (`2026-03-21`) の state が `proposalMessageId=''` / `availabilityMessageId='1479405332953436170'` / `finalized.slot=null` のままであることを確認
 - 同票時の候補選定を土日優先へ修正（`index.js`）
   - 変更前: 候補1/2 の選定時は `availableCount -> score/history -> deterministic` で並んでおり、`日曜6票` でも `月曜6票` / `木曜6票` に負けて候補外になることがあった
   - 変更後: `availableCount -> 土日優先 -> deterministic` へ変更
@@ -216,15 +233,15 @@
 ## 現在の状態
 - ローカル `node --check index.js` は成功
 - 本番 `node --check /home/ubuntu/discord-bot/index.js` は成功
-- 本番 `discord-bot` は `online`（PM2, restart `137`）
+- 本番 `discord-bot` は `online`（PM2, restart `145`）
 - 本番 `.env` は `TEAM_EVENT_CHANNEL_ID=1388409273293213756` / `OFFICIAL_TARGET_ID=1388409240682758174`
 - 投票開始リード日数は `10日`（対象週の月曜10日前の18:00 JST以降に投稿）
-- 確定ロジックは「票数優先 / 同票は土日優先 / 同カテゴリ同票はランダム」
+- 確定ロジックは「最多票日を直接確定 / 同票に土日を含む場合は土日優先 / 同カテゴリ同票はランダム」
 - 可用日パネルに `登録人数: X人` を表示
 - チームイベント投稿は可用日登録パネル1通のみ送信する実装
 - 本番 open proposal は `weekendKey=2026-03-21` が進行中
-- 本番 open proposal の state は `proposalMessageId=''` / `availabilityMessageId='1479405332953436170'`
-- 本番 open proposal の候補は `primary=2026-03-22 日曜 21:00` / `backup=2026-03-16 月曜 21:00`
+- 本番 open proposal の state は `proposalMessageId=''` / `availabilityMessageId='1479405332953436170'` / `finalized.slot=null`
+- ユーザー向け表示は候補なしで、締切時に最多票日を直接確定する状態
 - テストチャンネル `1473565419066495109` に単一パネル形式の送信確認済み（messageId `1479410165512929331`）
 - テストチャンネル `1473565419066495109` に単一パネル形式の再送確認済み（messageId `1479412317669294104`）
 - テストチャンネル `1473565419066495109` に `チームイベント日時確定` のテスト送信済み（messageId `1479413003618222172`）
@@ -237,16 +254,17 @@
 - [ ] テストチャンネル `1473565419066495109` の確認後、不要ならテストメッセージ `1479413003618222172` を削除する
 - [ ] `1388409273293213756` で次回の自動投稿（シフト登録/公式情報）が想定どおり出ることを運用確認
 - [x] Discordで可用日パネルが「月〜日ボタン+人数表示」になっていることを確認
-- [x] ローカル検証で「月曜10日前投稿判定 / 同票時土日優先+同カテゴリランダム / 上位2候補反映」を確認
+- [x] ローカル検証で「月曜10日前投稿判定 / 土日優先の同票解消 / 最多票日直接確定」を確認
 - [ ] 次回提案が「対象週の月曜10日前の18:00 JST以降」に投稿されることを実運用で確認
 - [ ] 同票時の確定結果が「土日優先 / 同カテゴリはランダム」で動くことを次回確定時に確認
-- [ ] 複数人で日付ボタンを押し、上位2日が候補へ反映されることを実運用チャンネルで確認（手動）
+- [ ] 複数人で日付ボタンを押し、最多票日の表示と締切時直接確定が実運用チャンネルで想定どおり動くことを確認（手動）
 - [x] すでに投稿済みの現行提案に可用日パネルが必要な場合は `!te panel` 相当を実行（メッセージ再送済み）
 
 ## 注意点
 - SSH転送が不安定な場合、反映後に `wc -l index.js` と `node --check index.js` を必ず実施する
 - WindowsのOpenSSHで known_hosts 未登録時、SSHが待機してタイムアウトすることがある。`StrictHostKeyChecking=accept-new` で一度登録してから実行すると安定
 - SSH長時間転送が切れやすく、`scp` は失敗しやすい。緊急時は一時URL経由の更新が有効
+- 本番サーバーで `git pull` が `HEAD` ロックエラーを返しても、まれに `HEAD` 自体は更新済みのことがある。`git rev-parse HEAD` を確認してから次の操作へ進むこと
 - `pm2 logs` の error には過去の `SyntaxError` 行が残るため、現行状態は `pm2 status` の `online` と最新 `out.log` を併せて確認すること
 - 文字化け確認時は `Get-Content -Encoding UTF8` を使うこと
 - `!te panel` は「ボット以外のユーザー発言」でのみ実行可能（実装で `message.author.bot` を無視）。自動化時はAPIで直接パネル再送する必要あり

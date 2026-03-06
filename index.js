@@ -905,15 +905,19 @@ function buildTeamEventHistoryText(countText = '') {
         const weekendRangeLabel = isValidDateKey(entry?.weekendKey)
             ? getTeamEventWindowRangeLabel(entry.weekendKey)
             : '対象週不明';
-        const joinCount = Number.isFinite(entry?.joinCount) ? entry.joinCount : 0;
-        const maybeCount = Number.isFinite(entry?.maybeCount) ? entry.maybeCount : 0;
-        const absentCount = Number.isFinite(entry?.absentCount) ? entry.absentCount : 0;
+        const availabilityCount = Number.isFinite(entry?.availabilityCount)
+            ? entry.availabilityCount
+            : (
+                Number.isFinite(entry?.joinCount)
+                    ? entry.joinCount
+                    : 0
+            );
         const decidedAt = entry?.decidedAt ? new Date(entry.decidedAt) : null;
         const decidedAtLabel = decidedAt && !Number.isNaN(decidedAt.getTime())
             ? `${formatDateForEmbed(decidedAt)} JST`
             : '不明';
         lines.push(
-            `${idx + 1}. ${dateKey} ${dayLabel} ${time} | 参加:${joinCount} 未定:${maybeCount} 不参加:${absentCount}`
+            `${idx + 1}. ${dateKey} ${dayLabel} ${time} | 可用日集計:${availabilityCount}人`
         );
         lines.push(`   対象週: ${weekendRangeLabel} / 確定: ${decidedAtLabel}`);
     });
@@ -952,10 +956,20 @@ function getHistoricalSlotScore(dayCode, timeText) {
         entry &&
         entry.dayCode === dayCode &&
         entry.time === timeText &&
-        typeof entry.attendanceScore === 'number'
+        (
+            typeof entry.availabilityCount === 'number' ||
+            typeof entry.attendanceScore === 'number'
+        )
     ));
     if (filtered.length === 0) return 0;
-    const total = filtered.reduce((acc, entry) => acc + entry.attendanceScore, 0);
+    const total = filtered.reduce(
+        (acc, entry) => acc + (
+            typeof entry.availabilityCount === 'number'
+                ? entry.availabilityCount
+                : entry.attendanceScore
+        ),
+        0
+    );
     return total / filtered.length;
 }
 
@@ -966,10 +980,20 @@ function getHistoricalDayScore(dayCode) {
     const filtered = list.filter(entry => (
         entry &&
         entry.dayCode === dayCode &&
-        typeof entry.attendanceScore === 'number'
+        (
+            typeof entry.availabilityCount === 'number' ||
+            typeof entry.attendanceScore === 'number'
+        )
     ));
     if (filtered.length === 0) return 0;
-    const total = filtered.reduce((acc, entry) => acc + entry.attendanceScore, 0);
+    const total = filtered.reduce(
+        (acc, entry) => acc + (
+            typeof entry.availabilityCount === 'number'
+                ? entry.availabilityCount
+                : entry.attendanceScore
+        ),
+        0
+    );
     return total / filtered.length;
 }
 
@@ -986,12 +1010,22 @@ function pickBestTimeForDay(dayCode, seed) {
             entry &&
             entry.dayCode === dayCode &&
             entry.time === slot &&
-            typeof entry.attendanceScore === 'number'
+            (
+                typeof entry.availabilityCount === 'number' ||
+                typeof entry.attendanceScore === 'number'
+            )
         ));
         const count = filtered.length;
         const score = count === 0
             ? 0
-            : filtered.reduce((acc, entry) => acc + entry.attendanceScore, 0) / count;
+            : filtered.reduce(
+                (acc, entry) => acc + (
+                    typeof entry.availabilityCount === 'number'
+                        ? entry.availabilityCount
+                        : entry.attendanceScore
+                ),
+                0
+            ) / count;
 
         if (
             score > bestScore ||
@@ -2083,6 +2117,29 @@ async function updateTeamEventProposalMessage(readyClient, record) {
     }
 }
 
+async function deleteTeamEventProposalMessage(readyClient, record) {
+    if (!record.channelId || !record.proposalMessageId) return false;
+
+    const proposalMessageId = record.proposalMessageId;
+    record.proposalMessageId = '';
+
+    const channel = await resolveTeamEventChannelById(readyClient, record.channelId);
+    if (!channel || !channel.messages || typeof channel.messages.fetch !== 'function') {
+        return true;
+    }
+
+    try {
+        const message = await channel.messages.fetch(proposalMessageId);
+        if (message) {
+            await message.delete().catch(() => null);
+        }
+    } catch (e) {
+        console.error(`Failed to delete team event proposal message: ${record.weekendKey}`, e.message);
+    }
+
+    return true;
+}
+
 async function updateTeamEventAvailabilityPanelMessage(readyClient, record) {
     if (!record.channelId || !record.availabilityMessageId) return;
     const channel = await resolveTeamEventChannelById(readyClient, record.channelId);
@@ -2101,7 +2158,6 @@ async function sendTeamEventFinalizedSummary(channel, record) {
     const slotRecord = getTeamEventSlotRecord(record, record.finalized.slot);
     const finalizedLabel = record.finalized.eventLabel || `${slotRecord.dayLabel} ${slotRecord.time} (JST)`;
     const voteSummary = buildTeamEventSlotVoteSummary(record);
-    const attendanceSummary = buildTeamEventAttendanceVoteText(record);
     const activitiesText = buildTeamEventActivitiesText(record);
 
     if (!canChannelEmbedLinks(channel)) {
@@ -2112,9 +2168,6 @@ async function sendTeamEventFinalizedSummary(channel, record) {
             '',
             '可用日集計結果',
             voteSummary,
-            '',
-            '出欠（自動集計）',
-            attendanceSummary,
             '',
             'やること案',
             activitiesText
@@ -2129,7 +2182,6 @@ async function sendTeamEventFinalizedSummary(channel, record) {
         .addFields(
             { name: '確定日時', value: finalizedLabel },
             { name: '可用日集計結果', value: voteSummary },
-            { name: '出欠（自動集計）', value: attendanceSummary },
             { name: 'やること案', value: activitiesText }
         );
 
@@ -2147,16 +2199,12 @@ async function sendTeamEventReminder(channel, record, reminderType) {
         ? `${reminderHours}時間前`
         : `${reminderDays}日前`;
     const finalizedLabel = record.finalized.eventLabel || '日時確定済み';
-    const attendanceSummary = buildTeamEventAttendanceVoteText(record);
     const activitiesText = buildTeamEventActivitiesText(record);
 
     if (!canChannelEmbedLinks(channel)) {
         const text = [
             `【チームイベントリマインド（${label}）】`,
             `開催日時: ${finalizedLabel}`,
-            '',
-            '出欠（自動集計）',
-            attendanceSummary,
             '',
             'やること案',
             activitiesText
@@ -2170,7 +2218,6 @@ async function sendTeamEventReminder(channel, record, reminderType) {
         .setTitle(`チームイベントリマインド（${label}）`)
         .setDescription(`開催日時: ${finalizedLabel}`)
         .addFields(
-            { name: '出欠（自動集計）', value: attendanceSummary },
             { name: 'やること案', value: activitiesText }
         );
 
@@ -2205,6 +2252,7 @@ async function finalizeTeamEventProposal(readyClient, record, nowMs) {
         decidedAt: record.finalized.decidedAt,
         dayCode: finalSlotRecord.dayCode,
         time: finalSlotRecord.time,
+        availabilityCount: finalSlotRecord.votes.length,
         attendanceScore: getTeamEventAttendanceScore(record),
         joinCount: record.attendance.join.length,
         maybeCount: record.attendance.maybe.length,
@@ -2303,6 +2351,14 @@ async function runTeamEventMaintenance(readyClient) {
         let stateChanged = false;
 
         for (const record of proposalEntries) {
+            if (!record.finalized.slot && record.proposalMessageId && record.availabilityMessageId) {
+                const proposalDeleted = await deleteTeamEventProposalMessage(readyClient, record);
+                if (proposalDeleted) {
+                    upsertTeamEventProposalRecord(record);
+                    stateChanged = true;
+                }
+            }
+
             if (!record.finalized.slot) {
                 const { slotChanged, voteCountsChanged } = recalculateTeamEventProposalSlots(record);
                 if (slotChanged || voteCountsChanged) {
@@ -2363,20 +2419,14 @@ async function maybePostTeamEventProposal(readyClient) {
 
         const proposal = buildTeamEventProposal(weekendKey);
         const record = createTeamEventProposalRecord(teamEventTargetChannel.id, proposal);
-        const message = await sendTeamEventProposal(teamEventTargetChannel, record);
-        record.proposalMessageId = message.id;
-        try {
-            const availabilityMessage = await sendTeamEventAvailabilityPanel(teamEventTargetChannel, record);
-            if (availabilityMessage && availabilityMessage.id) {
-                record.availabilityMessageId = availabilityMessage.id;
-            }
-        } catch (e) {
-            console.error(`Failed to send team event availability panel: ${weekendKey}`, e.message);
+        const availabilityMessage = await sendTeamEventAvailabilityPanel(teamEventTargetChannel, record);
+        if (availabilityMessage && availabilityMessage.id) {
+            record.availabilityMessageId = availabilityMessage.id;
         }
         upsertTeamEventProposalRecord(record);
         markTeamEventPosted(weekendKey);
         saveTeamEventState();
-        console.log(`Team event proposal posted: ${weekendKey}`);
+        console.log(`Team event availability panel posted: ${weekendKey}`);
     } catch (e) {
         console.error('Team event proposal failed:', e.message);
         teamEventTargetChannel = null;
@@ -2695,6 +2745,11 @@ client.on(Events.InteractionCreate, async interaction => {
 
             if (voteParsed.category === 'slot') {
                 await interaction.reply({ content: '候補日の手動投票は無効です。可用日パネルを使ってください。', ephemeral: true });
+                return;
+            }
+
+            if (voteParsed.category === 'attendance') {
+                await interaction.reply({ content: '参加/不参加ボタンは廃止しました。可用日パネルだけ使ってください。', ephemeral: true });
                 return;
             }
 

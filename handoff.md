@@ -1,8 +1,27 @@
 ﻿# Handoff - discord_shin
 
-更新: 2026-03-06 18:14:03
+更新: 2026-03-06 18:28:04
 
 ## 今回やったこと
+- チームイベントを「可用日登録パネル1通だけ」の運用へ修正（`index.js`）
+  - 自動投稿で `sendTeamEventProposal()` を呼ばないよう変更
+  - 既存 open proposal に `proposalMessageId` と `availabilityMessageId` が両方ある場合、maintenance で旧提案メッセージを削除する処理を追加
+- 出欠UIの撤廃に合わせてユーザー向け文面を調整（`index.js`）
+  - リマインド/確定通知/履歴表示から `参加/未定/不参加` 文言を削除
+  - 履歴の集計表示を `可用日集計: X人` に変更
+  - 旧出欠ボタンを押した場合は「廃止済み」の案内を返すよう変更
+- ローカル検証
+  - `node --check index.js` 成功
+- テスト送信
+  - 本番 open proposal (`weekendKey=2026-03-21`) 相当の単一パネル形式を `1473565419066495109` へ送信
+  - テストメッセージID: `1479410165512929331`
+- GitHub 反映
+  - `32bd5e4` `fix: send only shift availability panel` を `origin/main` へ push
+- 本番反映
+  - `/home/ubuntu/discord-bot` で `git pull --ff-only origin main` 実施
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実施（restart `137` / `online`）
+  - 本番 state で `proposalMessageId=''` / `availabilityMessageId=1479405332953436170` を確認
 - `OFFICIAL_TARGET_ID` のデフォルト固定IDを廃止（`index.js`）
   - 変更前: `process.env.OFFICIAL_TARGET_ID || '1261502032037154976'`
   - 変更後: `process.env.OFFICIAL_TARGET_ID || process.env.TEAM_EVENT_CHANNEL_ID || ''`
@@ -177,16 +196,20 @@
 ## 現在の状態
 - ローカル `node --check index.js` は成功
 - 本番 `node --check /home/ubuntu/discord-bot/index.js` は成功
-- 本番 `discord-bot` は `online`（PM2, restart `135`）
+- 本番 `discord-bot` は `online`（PM2, restart `137`）
 - 本番 `.env` は `TEAM_EVENT_CHANNEL_ID=1388409273293213756` / `OFFICIAL_TARGET_ID=1388409240682758174`
 - 投票開始リード日数は `10日`（対象週の月曜10日前の18:00 JST以降に投稿）
 - 確定ロジックは「票数優先 / 同票は土日優先 / 同カテゴリ同票はランダム」
 - 可用日パネルに `登録人数: X人` を表示
-- 本番 open proposal はなし（`team_event_state.json`: `open=0`, `postedWeekendKeys=[]`）
-- ローカル未コミット: `index.js`, `handoff.md`
+- チームイベント投稿は可用日登録パネル1通のみ送信する実装
+- 本番 open proposal は `weekendKey=2026-03-21` が進行中
+- 本番 open proposal の state は `proposalMessageId=''` / `availabilityMessageId='1479405332953436170'`
+- テストチャンネル `1473565419066495109` に単一パネル形式の送信確認済み（messageId `1479410165512929331`）
+- ローカル未コミット: `handoff.md`
 - ローカル未追跡ファイルはクリーン（`git status` で `??` なし）
 
 ## 残りのタスク
+- [ ] テストチャンネル `1473565419066495109` の確認後、不要ならテストメッセージ `1479410165512929331` を削除する
 - [ ] `1388409273293213756` で次回の自動投稿（シフト登録/公式情報）が想定どおり出ることを運用確認
 - [x] Discordで可用日パネルが「月〜日ボタン+人数表示」になっていることを確認
 - [x] ローカル検証で「月曜10日前投稿判定 / 同票時土日優先+同カテゴリランダム / 上位2候補反映」を確認

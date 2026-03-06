@@ -1,8 +1,21 @@
 ﻿# Handoff - discord_shin
 
-更新: 2026-03-06 18:37:00
+更新: 2026-03-06 18:48:21
 
 ## 今回やったこと
+- 同票時の候補選定を土日優先へ修正（`index.js`）
+  - 変更前: 候補1/2 の選定時は `availableCount -> score/history -> deterministic` で並んでおり、`日曜6票` でも `月曜6票` / `木曜6票` に負けて候補外になることがあった
+  - 変更後: `availableCount -> 土日優先 -> deterministic` へ変更
+  - 意図: `平日 vs 土日` の同票は土日を候補上位にし、`平日同士` / `土日同士` の同票だけ擬似ランダムで解消する
+- ローカル検証
+  - 現在の本番相当データ（`月6 / 木6 / 日6 / 土5`）で並び順が `日 -> 月 -> 木` になることを確認
+- GitHub 反映
+  - `46502af` `fix: use weekend-first shift tie break` を `origin/main` へ push
+- 本番反映
+  - `/home/ubuntu/discord-bot` で `git pull --ff-only origin main` 実施
+  - 本番 `node --check index.js` 成功
+  - `pm2 restart discord-bot --update-env` 実施
+  - 本番 state の `2026-03-21` open proposal が `primary=2026-03-22 日曜 21:00` / `backup=2026-03-16 月曜 21:00` に更新されたことを確認
 - チームイベントを「可用日登録パネル1通だけ」の運用へ修正（`index.js`）
   - 自動投稿で `sendTeamEventProposal()` を呼ばないよう変更
   - 既存 open proposal に `proposalMessageId` と `availabilityMessageId` が両方ある場合、maintenance で旧提案メッセージを削除する処理を追加
@@ -211,6 +224,7 @@
 - チームイベント投稿は可用日登録パネル1通のみ送信する実装
 - 本番 open proposal は `weekendKey=2026-03-21` が進行中
 - 本番 open proposal の state は `proposalMessageId=''` / `availabilityMessageId='1479405332953436170'`
+- 本番 open proposal の候補は `primary=2026-03-22 日曜 21:00` / `backup=2026-03-16 月曜 21:00`
 - テストチャンネル `1473565419066495109` に単一パネル形式の送信確認済み（messageId `1479410165512929331`）
 - テストチャンネル `1473565419066495109` に単一パネル形式の再送確認済み（messageId `1479412317669294104`）
 - テストチャンネル `1473565419066495109` に `チームイベント日時確定` のテスト送信済み（messageId `1479413003618222172`）

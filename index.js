@@ -160,7 +160,7 @@ function getRemindersForChannel(channelId) {
 }
 
 // ========== Official feed relay (X + DQX news) ==========
-const OFFICIAL_TARGET_ID = (process.env.OFFICIAL_TARGET_ID || '1261502032037154976').trim();
+const OFFICIAL_TARGET_ID = (process.env.OFFICIAL_TARGET_ID || process.env.TEAM_EVENT_CHANNEL_ID || '').trim();
 const OFFICIAL_POLL_INTERVAL_MINUTES = parseInt(process.env.OFFICIAL_POLL_INTERVAL_MINUTES || '5', 10);
 const OFFICIAL_POLL_INTERVAL_MS = (
     Number.isFinite(OFFICIAL_POLL_INTERVAL_MINUTES) ? Math.max(1, OFFICIAL_POLL_INTERVAL_MINUTES) : 5

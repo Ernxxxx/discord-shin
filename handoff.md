@@ -1,8 +1,44 @@
 ﻿# Handoff - discord_shin
 
-更新: 2026-02-27 15:58:42
+更新: 2026-03-06 18:14:03
 
 ## 今回やったこと
+- `OFFICIAL_TARGET_ID` のデフォルト固定IDを廃止（`index.js`）
+  - 変更前: `process.env.OFFICIAL_TARGET_ID || '1261502032037154976'`
+  - 変更後: `process.env.OFFICIAL_TARGET_ID || process.env.TEAM_EVENT_CHANNEL_ID || ''`
+  - 意図: `OFFICIAL_TARGET_ID` 未設定時に旧固定チャンネルへ誤送信されるリスクを回避
+- ローカル検証
+  - `node --check index.js` 成功
+- 送信先を用途別に分離して本番反映
+  - `TEAM_EVENT_CHANNEL_ID=1388409273293213756`（シフト系 / 雑談）
+  - `OFFICIAL_TARGET_ID=1388409240682758174`（公式情報・X / 情報）
+  - `pm2 restart discord-bot --update-env` 実施（restart `135` / `online`）
+- `1261502032037154976` への再送防止を実施
+  - `OFFICIAL_TARGET_ID` の既定値から固定IDを削除
+  - `OFFICIAL_TARGET_ID` 未設定時は `TEAM_EVENT_CHANNEL_ID` を参照するよう変更
+  - 本番 `index.js` 反映後 `pm2 restart discord-bot --update-env` 実施（restart `134` / `online`）
+- 本番チャンネルを `1388409273293213756` に統一
+  - `.env` の `TEAM_EVENT_CHANNEL_ID` / `OFFICIAL_TARGET_ID` を同IDに変更
+  - `pm2 restart discord-bot --update-env` 実施（restart `133` / `online`）
+- テスト投稿の削除を実施
+  - `1476951734797734053` を削除（新チャンネル）
+  - `1476072978876858579` を削除（「チームイベント提案（隔週）テスト」）
+- 公式情報配信先を指定チャンネルへ変更（本番 `.env`）
+  - 変更前: `OFFICIAL_TARGET_ID=1473565419066495109`
+  - 変更後: `OFFICIAL_TARGET_ID=1388409240682758174`（guild: `1388403928994938920`, channel: `情報`）
+  - 本番 `pm2 restart discord-bot --update-env` 実施（restart `132` / `online`）
+- 接続確認
+  - ローカルbotトークンで `1388409240682758174` のチャンネル取得に成功
+  - type: `GuildText(0)` / name: `情報`
+- 本番の旧提案（`weekendKey=2026-04-04`）を整理
+  - `/home/ubuntu/discord-bot/team_event_state.json` から当該 proposal を削除
+  - `postedWeekendKeys` から `2026-04-04` を削除
+  - 整理後の確認結果: `open proposal = 0`, `postedWeekendKeys = []`
+- 旧メッセージのクリーンアップ
+  - 可用日パネル `1476838655615045702` を削除
+  - 提案メッセージ `1476424886963535964` は既に削除済み（`Unknown Message`）
+- 本番再起動
+  - `pm2 restart discord-bot --update-env` 実施（restart `131` / `online`）
 - `!te history [件数]` コマンドを追加（`index.js`）
   - 過去イベント履歴（確定日/曜日/時刻/参加・未定・不参加人数/対象週/確定日時）を最新順で表示
   - 件数指定対応（デフォルト8件、最大20件）
@@ -141,18 +177,17 @@
 ## 現在の状態
 - ローカル `node --check index.js` は成功
 - 本番 `node --check /home/ubuntu/discord-bot/index.js` は成功
-- 本番 `discord-bot` は `online`（PM2, restart `127`）
+- 本番 `discord-bot` は `online`（PM2, restart `135`）
+- 本番 `.env` は `TEAM_EVENT_CHANNEL_ID=1388409273293213756` / `OFFICIAL_TARGET_ID=1388409240682758174`
 - 投票開始リード日数は `10日`（対象週の月曜10日前の18:00 JST以降に投稿）
 - 確定ロジックは「票数優先 / 同票は土日優先 / 同カテゴリ同票はランダム」
 - 可用日パネルに `登録人数: X人` を表示
-- 本番 open proposal
-  - `weekendKey=2026-04-04`
-  - `primary=2026-04-03 21:00`, `backup=2026-04-05 21:00`
-  - `availabilityMessageId=1476744675355267246`
-- ローカル未コミット: `.gitignore`, `index.js`, `handoff.md`
+- 本番 open proposal はなし（`team_event_state.json`: `open=0`, `postedWeekendKeys=[]`）
+- ローカル未コミット: `index.js`, `handoff.md`
 - ローカル未追跡ファイルはクリーン（`git status` で `??` なし）
 
 ## 残りのタスク
+- [ ] `1388409273293213756` で次回の自動投稿（シフト登録/公式情報）が想定どおり出ることを運用確認
 - [x] Discordで可用日パネルが「月〜日ボタン+人数表示」になっていることを確認
 - [x] ローカル検証で「月曜10日前投稿判定 / 同票時土日優先+同カテゴリランダム / 上位2候補反映」を確認
 - [ ] 次回提案が「対象週の月曜10日前の18:00 JST以降」に投稿されることを実運用で確認

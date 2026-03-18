@@ -15,6 +15,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const { execFile } = require('child_process');
+const { shouldSkipOfficialXItem } = require('./official-feed-utils');
 
 // ========== アストルティア防衛軍スケジュール ==========
 // 基準日時: 2025年1月22日 13:00 JST (周期Aの0時)
@@ -170,6 +171,11 @@ const OFFICIAL_DQX_TOPICS_URL = 'https://hiroba.dqx.jp/sc/topics/';
 const OFFICIAL_X_API_BASE_URL = process.env.X_API_BASE_URL || 'https://api.x.com/2';
 const OFFICIAL_X_ACCOUNT_URL = (process.env.X_API_ACCOUNT_URL || '').trim();
 const OFFICIAL_X_ACCOUNT_URLS = (process.env.X_API_ACCOUNT_URLS || '').trim();
+const OFFICIAL_X_MAX_POST_AGE_HOURS_RAW = parseInt(process.env.OFFICIAL_X_MAX_POST_AGE_HOURS || '72', 10);
+const OFFICIAL_X_MAX_POST_AGE_HOURS = Number.isFinite(OFFICIAL_X_MAX_POST_AGE_HOURS_RAW)
+    ? Math.max(1, OFFICIAL_X_MAX_POST_AGE_HOURS_RAW)
+    : 72;
+const OFFICIAL_X_MAX_POST_AGE_MS = OFFICIAL_X_MAX_POST_AGE_HOURS * 60 * 60 * 1000;
 const OFFICIAL_X_DEFAULT_ACCOUNT_URLS = [
     'https://x.com/dq_tora',
     'https://x.com/DQ_X'
@@ -2361,6 +2367,7 @@ async function sendOfficialFeedItem(channel, item) {
 async function pollOfficialFeeds(readyClient) {
     if (officialFeedPolling) return;
     officialFeedPolling = true;
+    const nowMs = Date.now();
 
     try {
         if (!officialFeedTargetChannel) {
@@ -2459,6 +2466,13 @@ async function pollOfficialFeeds(readyClient) {
             }
 
             if (hasSeenOfficialKey(item.source, item.key)) {
+                continue;
+            }
+
+            if (shouldSkipOfficialXItem(item, nowMs, OFFICIAL_X_MAX_POST_AGE_MS)) {
+                markOfficialKeySeen(item.source, item.key);
+                stateChanged = true;
+                console.warn(`Skipping stale official X item: ${item.key}`);
                 continue;
             }
 

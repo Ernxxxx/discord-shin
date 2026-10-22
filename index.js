@@ -4,7 +4,6 @@ const {
     GatewayIntentBits,
     Events,
     EmbedBuilder,
-    AttachmentBuilder,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
@@ -17,6 +16,8 @@ const https = require('https');
 const { execFile } = require('child_process');
 const { shouldSkipOfficialXItem } = require('./official-feed-utils');
 const { getBoueigunInfo } = require('./boueigun-schedule');
+const { parseBoueigunCommand } = require('./boueigun-query');
+const { buildBoueigunReply } = require('./boueigun-command');
 const { isTeamEventWeekendKeyAutomated } = require('./team-event-automation-utils');
 
 // ========== アストルティア防衛軍スケジュール ==========
@@ -2490,13 +2491,16 @@ client.once(Events.ClientReady, readyClient => {
         });
     }, 60000); // 60秒ごとにチェック
 
-    pollOfficialFeeds(readyClient);
+    const skipStartupAutomation = process.env.SHIN_SKIP_STARTUP_AUTOMATION === '1';
+    if (!skipStartupAutomation) pollOfficialFeeds(readyClient);
     setInterval(() => {
         pollOfficialFeeds(readyClient);
     }, OFFICIAL_POLL_INTERVAL_MS);
 
-    maybePostTeamEventProposal(readyClient);
-    runTeamEventMaintenance(readyClient);
+    if (!skipStartupAutomation) {
+        maybePostTeamEventProposal(readyClient);
+        runTeamEventMaintenance(readyClient);
+    }
     setInterval(() => {
         maybePostTeamEventProposal(readyClient);
         runTeamEventMaintenance(readyClient);
@@ -2889,7 +2893,7 @@ client.on(Events.MessageCreate, async message => {
             .setDescription('使用可能なコマンド')
             .addFields(
                 { name: '🎮 ネタ系', value: '`!n` ねけます\n`!m` もう無理\n`!mo` どうせｵﾚがﾋｰﾗｰ\n`!s` 申し訳なさございません\n`!d` ディスコ上げときますねー\n`!i` いいよ。ｵﾚ要らない\n`!a` あーいーいーいー\n`!si` 最近ｵﾚにあたり強くない？', inline: true },
-                { name: '📅 スケジュール', value: '`!b` 防衛軍スケジュール', inline: true },
+                { name: '📅 スケジュール', value: '`!b` 現在と次の兵団\n`!b 明日` 1日分\n`!b 21:00` / `!b 明日21時`\n`!b 3時間後` / `!b help`', inline: true },
                 { name: '⏰ リマインダー', value: '`!remind 21:00` 時刻指定\n`!remind 1/25 21:00` 日付指定\n`!remind 2025/1/25 21:00` 年指定\n`!remind 30m` 分指定\n`!r` 一覧 `!r delete 1` 削除\n`!r clear` 全削除', inline: true },
                 { name: '🎉 イベント', value: '`!3` 3月イベント告知\n`!te next` 次回シフト登録開始/イベント週\n`!te history` 過去イベント履歴\n`!te status` 現在の対象週\n`!te avail list` 自分の可用日\n`!te help` チームイベント詳細', inline: true }
             )
@@ -3052,51 +3056,15 @@ client.on(Events.MessageCreate, async message => {
         message.reply(`🗑️ ${count}件のリマインダーを全て削除しました。`);
     }
 
-    // 防衛軍スケジュールコマンド
-    if (message.content === '!boueigun' || message.content === '!防衛軍' || message.content === '!b') {
-        const info = getBoueigunInfo();
-
-        // 画像ファイルのパスを取得
-        const currentImageFile = BOUEIGUN_IMAGES[info.current];
-        const currentImagePath = path.join(__dirname, 'images', 'boueigun', currentImageFile);
-        const nextImageFile = BOUEIGUN_IMAGES[info.next];
-        const nextImagePath = path.join(__dirname, 'images', 'boueigun', nextImageFile);
-
-        const files = [];
-        const embeds = [];
-
-        // 現在の兵団Embed
-        const currentEmbed = new EmbedBuilder()
-            .setColor(0xFF6B6B)
-            .setAuthor({ name: 'アストルティア防衛軍', iconURL: 'https://i.imgur.com/AfFp7pu.png' })
-            .setTitle('🔥 現在の兵団')
-            .setDescription(`**${info.current}**`)
-            .addFields(
-                { name: '⏱️ 残り時間', value: `\`${info.remainingMinutes}分\``, inline: true }
-            );
-
-        if (fs.existsSync(currentImagePath)) {
-            const currentAttachment = new AttachmentBuilder(currentImagePath, { name: currentImageFile });
-            files.push(currentAttachment);
-            currentEmbed.setImage(`attachment://${currentImageFile}`);
+    // 防衛軍: 現在・指定日時・1日分の予報（日本時間）
+    const boueigunRequest = parseBoueigunCommand(message.content, Date.now());
+    if (boueigunRequest) {
+        try {
+            await message.reply(buildBoueigunReply(boueigunRequest, { root: __dirname, imageMap: BOUEIGUN_IMAGES, getInfo: getBoueigunInfo }));
+        } catch (error) {
+            console.error('Defence schedule reply failed:', error.message);
         }
-        embeds.push(currentEmbed);
-
-        // 次回予告Embed
-        const nextEmbed = new EmbedBuilder()
-            .setColor(0x4ECDC4)
-            .setTitle('📢 次回予告')
-            .setDescription(`**${info.next}**`)
-            .setFooter({ text: '!b または !防衛軍 で確認' });
-
-        if (fs.existsSync(nextImagePath)) {
-            const nextAttachment = new AttachmentBuilder(nextImagePath, { name: `next_${nextImageFile}` });
-            files.push(nextAttachment);
-            nextEmbed.setThumbnail(`attachment://next_${nextImageFile}`);
-        }
-        embeds.push(nextEmbed);
-
-        message.reply({ embeds: embeds, files: files });
+        return;
     }
 });
 

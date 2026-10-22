@@ -16,31 +16,15 @@ const fs = require('fs');
 const https = require('https');
 const { execFile } = require('child_process');
 const { shouldSkipOfficialXItem } = require('./official-feed-utils');
+const { getBoueigunInfo } = require('./boueigun-schedule');
 
 // ========== アストルティア防衛軍スケジュール ==========
-// 基準日時: 2025年1月22日 13:00 JST (周期Aの0時)
-const BOUEIGUN_EPOCH = new Date('2025-01-22T13:00:00+09:00').getTime();
-
-// ローテーション表
-const BOUEIGUN_SCHEDULE = {
-    common: {
-        0: '全兵団',
-        1: '金神の遺宝兵団',
-        2: '紅爆の暴賊兵団',
-        3: '全兵団',
-        8: '鋼塊の重滅兵団',
-        9: '紅爆の暴賊兵団'
-    },
-    A: { 4: '闇朱の獣牙兵団', 5: '蒼怨の屍獄兵団', 6: '灰塵の竜鱗兵団', 7: '白雲の冥翼兵団' },
-    B: { 4: '紫炎の鉄機兵団', 5: '銀甲の凶蟲兵団', 6: '彩虹の粘塊兵団', 7: '腐緑の樹葬兵団' },
-    C: { 4: '深碧の造魔兵団', 5: '翠煙の海妖兵団', 6: '芳墨の華烈兵団', 7: '青鮮の菜果兵団' }
-};
-
 // 兵団ごとの画像ファイル名（images/boueigun/ フォルダに配置）
 const BOUEIGUN_IMAGES = {
     '全兵団': 'zenheidan.png',
     '金神の遺宝兵団': 'kinjin.png',
     '紅爆の暴賊兵団': 'koubaku.png',
+    '冥黒の悪夢兵団': 'meikoku.png',
     '鋼塊の重滅兵団': 'koukai.png',
     '闇朱の獣牙兵団': 'anshu.png',
     '蒼怨の屍獄兵団': 'souen.png',
@@ -55,55 +39,6 @@ const BOUEIGUN_IMAGES = {
     '芳墨の華烈兵団': 'houboku.png',
     '青鮮の菜果兵団': 'seisen.png'
 };
-
-function getBoueigunInfo() {
-    const now = Date.now();
-    const hoursSinceEpoch = Math.floor((now - BOUEIGUN_EPOCH) / (1000 * 60 * 60));
-
-    // 30時間周期の中での位置
-    const positionIn30h = ((hoursSinceEpoch % 30) + 30) % 30;
-
-    // 周期 A/B/C の判定 (0=A, 1=B, 2=C)
-    const cycleIndex = Math.floor(positionIn30h / 10);
-    const cycleName = ['A', 'B', 'C'][cycleIndex];
-
-    // 表の時間帯（0-9）
-    const tableHour = positionIn30h % 10;
-
-    // 現在の兵団を取得
-    let currentHeidan;
-    if (tableHour in BOUEIGUN_SCHEDULE.common) {
-        currentHeidan = BOUEIGUN_SCHEDULE.common[tableHour];
-    } else {
-        currentHeidan = BOUEIGUN_SCHEDULE[cycleName][tableHour];
-    }
-
-    // 次の時間帯
-    const nextPositionIn30h = (positionIn30h + 1) % 30;
-    const nextCycleIndex = Math.floor(nextPositionIn30h / 10);
-    const nextCycleName = ['A', 'B', 'C'][nextCycleIndex];
-    const nextTableHour = nextPositionIn30h % 10;
-
-    // 次の兵団を取得
-    let nextHeidan;
-    if (nextTableHour in BOUEIGUN_SCHEDULE.common) {
-        nextHeidan = BOUEIGUN_SCHEDULE.common[nextTableHour];
-    } else {
-        nextHeidan = BOUEIGUN_SCHEDULE[nextCycleName][nextTableHour];
-    }
-
-    // 残り時間を計算
-    const msPerHour = 1000 * 60 * 60;
-    const msSinceHourStart = (now - BOUEIGUN_EPOCH) % msPerHour;
-    const remainingMs = msPerHour - msSinceHourStart;
-    const remainingMinutes = Math.floor(remainingMs / (1000 * 60));
-
-    return {
-        current: currentHeidan,
-        next: nextHeidan,
-        remainingMinutes: remainingMinutes
-    };
-}
 
 // ========== リマインダー機能 ==========
 const reminders = new Map(); // channelId -> [{ time: Date, userId: string, message: string }]

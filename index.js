@@ -17,6 +17,7 @@ const https = require('https');
 const { execFile } = require('child_process');
 const { shouldSkipOfficialXItem } = require('./official-feed-utils');
 const { getBoueigunInfo } = require('./boueigun-schedule');
+const { isTeamEventWeekendKeyAutomated } = require('./team-event-automation-utils');
 
 // ========== アストルティア防衛軍スケジュール ==========
 // 兵団ごとの画像ファイル名（images/boueigun/ フォルダに配置）
@@ -129,6 +130,9 @@ const TEAM_EVENT_INTERVAL_DAYS = Number.isFinite(TEAM_EVENT_INTERVAL_DAYS_RAW)
     ? Math.max(1, TEAM_EVENT_INTERVAL_DAYS_RAW)
     : 14;
 const TEAM_EVENT_EPOCH_SATURDAY = (process.env.TEAM_EVENT_EPOCH_SATURDAY || '2026-03-07').trim();
+const TEAM_EVENT_LAST_AUTOMATED_WEEKEND_KEY = (
+    process.env.TEAM_EVENT_LAST_AUTOMATED_WEEKEND_KEY || '2026-04-04'
+).trim();
 const TEAM_EVENT_STATE_FILE = path.join(__dirname, 'team_event_state.json');
 const TEAM_EVENT_TALLY_DELAY_HOURS = parseInt(process.env.TEAM_EVENT_TALLY_DELAY_HOURS || '48', 10);
 const TEAM_EVENT_REMINDER_DAYS_BEFORE = parseInt(process.env.TEAM_EVENT_REMINDER_DAYS_BEFORE || '3', 10);
@@ -754,7 +758,9 @@ function getNextTeamEventWeekendKey(now = new Date()) {
     for (let offset = -1; offset <= 400; offset += 1) {
         const weekendMs = baseSaturdayMs + (approxIndex + offset) * intervalMs;
         if (weekendMs < currentDayMs) continue;
-        return getJstDateKeyFromMs(weekendMs);
+        const weekendKey = getJstDateKeyFromMs(weekendMs);
+        if (!isTeamEventAutomationActiveForWeekendKey(weekendKey)) continue;
+        return weekendKey;
     }
 
     return null;
@@ -774,6 +780,7 @@ function getNextTeamEventAnnouncementInfo(now = new Date()) {
     for (let offset = -2; offset <= 400; offset += 1) {
         const weekendMs = baseSaturdayMs + (approxIndex + offset) * intervalMs;
         const weekendKey = getJstDateKeyFromMs(weekendMs);
+        if (!isTeamEventAutomationActiveForWeekendKey(weekendKey)) continue;
         const cycleInfo = buildTeamEventCycleInfo(weekendKey);
         if (!cycleInfo || !Number.isFinite(cycleInfo.announcementPostMs)) continue;
         if (cycleInfo.announcementPostMs < nowMs) continue;
@@ -795,13 +802,14 @@ function buildTeamEventNextScheduleText(now = new Date()) {
         lines.push(`次回イベント週: ${nextShiftInfo.weekendRangeLabel}`);
         lines.push(`周期キー日: ${nextShiftInfo.weekendKey}`);
     } else {
-        lines.push('次回シフト登録開始: 計算できませんでした');
+        lines.push('次回シフト登録開始: 予定はありません');
         const nextEventWeekendKey = getNextTeamEventWeekendKey(now);
         if (nextEventWeekendKey) {
             lines.push(`直近イベント週: ${getTeamEventWindowRangeLabel(nextEventWeekendKey)}`);
             lines.push(`周期キー日: ${nextEventWeekendKey}`);
         } else {
-            lines.push('直近イベント週: 計算できませんでした');
+            lines.push(`最終イベント週: ${getTeamEventWindowRangeLabel(TEAM_EVENT_LAST_AUTOMATED_WEEKEND_KEY)}`);
+            lines.push(`最終周期キー日: ${TEAM_EVENT_LAST_AUTOMATED_WEEKEND_KEY}`);
         }
     }
 
@@ -1128,10 +1136,14 @@ function getTeamEventAttendanceScore(record) {
     return record.attendance.join.length + record.attendance.maybe.length * 0.5;
 }
 
+function isTeamEventAutomationActiveForWeekendKey(weekendKey) {
+    return isTeamEventWeekendKeyAutomated(weekendKey, TEAM_EVENT_LAST_AUTOMATED_WEEKEND_KEY);
+}
+
 function getLatestOpenTeamEventProposalRecord() {
     const entries = Object.entries(teamEventState.proposals || {})
         .map(([weekendKey, record]) => normalizeTeamEventProposalRecord(record, weekendKey))
-        .filter(record => !record.finalized.slot)
+        .filter(record => !record.finalized.slot && isTeamEventAutomationActiveForWeekendKey(record.weekendKey))
         .sort((a, b) => b.weekendKey.localeCompare(a.weekendKey));
     return entries[0] || null;
 }
@@ -2182,6 +2194,10 @@ async function runTeamEventMaintenance(readyClient) {
         let stateChanged = false;
 
         for (const record of proposalEntries) {
+            if (!isTeamEventAutomationActiveForWeekendKey(record.weekendKey)) {
+                continue;
+            }
+
             if (!record.finalized.slot && record.proposalMessageId && record.availabilityMessageId) {
                 const proposalDeleted = await deleteTeamEventProposalMessage(readyClient, record);
                 if (proposalDeleted) {
@@ -2235,6 +2251,7 @@ async function maybePostTeamEventProposal(readyClient) {
     if (saturdayMs === null) return;
 
     const weekendKey = getJstDateKeyFromMs(saturdayMs);
+    if (!isTeamEventAutomationActiveForWeekendKey(weekendKey)) return;
     if (hasTeamEventPosted(weekendKey) || getTeamEventProposalRecord(weekendKey)) return;
 
     teamEventPosting = true;
@@ -2567,6 +2584,10 @@ client.on(Events.InteractionCreate, async interaction => {
         const record = getTeamEventProposalRecord(parsed.weekendKey);
         if (!record) {
             await interaction.reply({ content: 'proposal not found', ephemeral: true });
+            return;
+        }
+        if (!isTeamEventAutomationActiveForWeekendKey(record.weekendKey)) {
+            await interaction.reply({ content: 'team event availability panel is no longer active', ephemeral: true });
             return;
         }
 

@@ -12,3 +12,14 @@ test_calendar.js
 test_*.png
 designs/
 nul
+
+# Runtime data and local operations records
+reminders.json
+team_event_state.json
+official_feed_state.json
+handoff.md
+findings.md
+progress.md
+index.js.bak*
+index_js.tar
+upload_test.txt
